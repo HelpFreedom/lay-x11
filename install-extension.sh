@@ -24,8 +24,9 @@ gnome-extensions enable "$UUID" || true
 gnome-extensions info "$UUID" | head -10
 
 echo ""
-echo "=== ⚠ нужен перелогин в GNOME ==="
-echo "На Wayland gnome-shell нельзя перезагрузить без logout (на X11 — Alt+F2 → r)."
+echo "=== проверка загрузки ==="
+echo "Если индикатор не появился после первой установки, выйди из GNOME и зайди снова."
+echo "Для разработки уже загруженного extension можно использовать ./dev-reload.sh."
 echo ""
 echo "После перелогина проверка:"
 echo "  gdbus call --session \\"

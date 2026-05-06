@@ -266,9 +266,6 @@ def rows() -> list[Row]:
     for left in RU_LEFT:
         for target in EN_TARGETS:
             typed = f"{left} {convert(target, 'us2ru')}"
-            expected = f"{left} {target.title() if target in {'good', 'test', 'word', 'live', 'double', 'code', 'data', 'new'} else target}"
-            # Keep title-case expectations only for physical Shift examples below;
-            # normal generated matrix uses lowercase English targets.
             expected = f"{left} {target}"
             out.append(row("ru_left_en_target", typed, expected, "russian left, english target typed in RU layout", "last"))
 

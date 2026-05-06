@@ -1,13 +1,11 @@
-//! Оценка качества словарной конвертации.
+//! Legacy/auxiliary plausibility score for converted text.
 //!
-//! Простая эвристика без внешних зависимостей: считаем долю слов,
-//! которые "выглядят как настоящие". Для русского/английского
-//! проверяем что в слове нет редких сочетаний согласных подряд
-//! (типичный признак случайного набора в чужой раскладке).
+//! This module is intentionally lightweight and has no external dictionary
+//! dependency. The current public CLI path is deterministic; the daemon's smart
+//! path uses dictionaries/ngram/token rules first. These helpers remain useful
+//! for tests and conservative fallback scoring.
 //!
-//! Это компромисс между качеством детекта и весом бинарника:
-//! полные словари hunspell весят 10-30 МБ, а нам нужен мгновенный
-//! ответ "плохой ли результат".
+//! The score is only a plausibility hint, not a production guarantee.
 
 const RU_VOWELS: &str = "аеёиоуыэюяАЕЁИОУЫЭЮЯ";
 const EN_VOWELS: &str = "aeiouAEIOU";

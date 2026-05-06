@@ -1,13 +1,15 @@
 //! lay-daemon — Caramba/Punto-style для GNOME Wayland.
 //!
-//! Принцип: НЕ конвертируем словарём US↔RU. Запоминаем физические нажатия
-//! клавиш и при двойном Shift:
+//! Базовый replay-принцип: запоминаем физические нажатия клавиш и при двойном
+//! Shift:
 //!   1) стираем последнее слово через uinput Backspace × N,
 //!   2) переключаем раскладку через GNOME Shell extension,
 //!   3) повторяем те же физические клавиши через uinput — gnome-shell сам
 //!      интерпретирует их в новой раскладке.
 //!
-//! Это работает с любыми парами раскладок (US↔RU, US↔DE, ...) без таблиц.
+//! Этот replay core не требует словарной конвертации. Smart/typing-assist
+//! ветки дополнительно используют RU/EN-таблицы, словари и n-gram scorer; они
+//! сейчас оптимизированы и протестированы именно для RU/EN.
 
 use clap::Parser;
 use evdev::{uinput::VirtualDevice, AttributeSet, Device, EventType, InputEvent, KeyCode};

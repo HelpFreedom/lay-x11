@@ -27,35 +27,39 @@ Each row has a `current_token` field:
 Regenerate the stress table:
 
 ```bash
-python3.12 scripts/generate_two_word_cases.py
+python3 scripts/generate_two_word_cases.py
 ```
 
 Run deterministic candidate coverage and local rules:
 
 ```bash
-python3.12 scripts/eval_two_word_models.py \
+python3 scripts/eval_two_word_models.py \
   --layers coverage,oracle,layout_rules
 ```
 
 Run `rubert-tiny2` as a raw masked-LM scorer:
 
 ```bash
-/home/ubu/.cache/lay-model-eval/venv/bin/python \
-  scripts/eval_two_word_models.py \
+python3 scripts/eval_two_word_models.py \
   --layers tiny2 \
+  --limit 20 \
   --threads 4 \
-  --report eval/two_word_model_eval_tiny2.md
+  --report eval/two_word_model_eval_tiny2_20.md
 ```
 
 Run `sage-fredt5-distilled-95m` as a raw generator:
 
 ```bash
-/home/ubu/.cache/lay-model-eval/venv/bin/python \
-  scripts/eval_two_word_models.py \
+python3 scripts/eval_two_word_models.py \
   --layers sage \
+  --limit 20 \
   --threads 4 \
-  --report eval/two_word_model_eval_sage.md
+  --report eval/two_word_model_eval_sage_20.md
 ```
+
+The optional model layers require local Python packages such as `torch` and
+`transformers`; use any virtual environment you prefer. The deterministic
+coverage/layer checks do not require those model packages.
 
 Current result on the generated stress table:
 

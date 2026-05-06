@@ -4,7 +4,7 @@
  * чтобы обойти кэш модулей GJS. Это позволяет обновлять код
  * через disable → enable без logout.
  *
- * GNOME Shell 45+ / 46 — ES modules
+ * GNOME Shell 45, 46, 47, 50 — ES modules
  */
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';

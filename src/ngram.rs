@@ -1,8 +1,8 @@
 //! Lightweight char n-gram scorer for short local decisions.
 //!
 //! This is not a generator. It only compares ready candidates and answers:
-//! which text looks more natural for the language model trained from local
-//! dictionaries and user data.
+//! which text looks more natural for the model trained from local dictionaries
+//! and optional local user word lists.
 
 use std::collections::{HashMap, HashSet};
 use std::io;

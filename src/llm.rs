@@ -1,8 +1,9 @@
-//! LLM fallback через локальную GGUF-модель.
+//! Optional local model arbiter for already-built layout candidates.
 //!
-//! SmolLM-135M слишком маленькая модель для свободного редактирования текста,
-//! поэтому используем её как быстрый классификатор: код строит кандидаты сам,
-//! а модель выбирает один из них. Невалидный ответ игнорируется.
+//! The daemon builds deterministic candidates first. A configured backend can
+//! only vote between those candidates with a short A/B answer; invalid answers
+//! are ignored. The default backend is `off`. Direct GGUF loading requires the
+//! `direct-llm` feature.
 
 #[cfg(feature = "direct-llm")]
 use llama_cpp::{

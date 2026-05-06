@@ -3,19 +3,29 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-head_count="$(git rev-list --count HEAD)"
-next_count="$((head_count + 1))"
-version="0.1.${next_count}"
+current_version="$(perl -ne 'print "$1.$2.$3\n" if /^version = "([0-9]+)\.([0-9]+)\.([0-9]+)"/' Cargo.toml | head -n1)"
+if [[ -z "${current_version}" ]]; then
+    echo "Cannot read Cargo.toml package version" >&2
+    exit 1
+fi
+
+IFS=. read -r major minor patch <<<"${current_version}"
+next_patch="$((patch + 1))"
+version="${major}.${minor}.${next_patch}"
 release_date="$(date +%F)"
 
 perl -0pi -e 's/^version = "[^"]+"/version = "'"${version}"'"/m' Cargo.toml
+perl -0pi -e 's/"version": [0-9]+/"version": '"${next_patch}"'/' \
+  extension/lay@radislabus-star.github.io/metadata.json
 perl -0pi -e 's/"version-name": "[^"]+"/"version-name": "'"${version}"'"/' \
   extension/lay@radislabus-star.github.io/metadata.json
 perl -0pi -e "s/const APP_VERSION = '[^']+';/const APP_VERSION = '${version}';/" \
   extension/lay@radislabus-star.github.io/lay-impl.js
 perl -0pi -e "s/const APP_RELEASE_DATE = '[^']+';/const APP_RELEASE_DATE = '${release_date}';/" \
   extension/lay@radislabus-star.github.io/lay-impl.js
+perl -0pi -e 's/Current publication branch version:\n\n- `[^`]+`/Current publication branch version:\n\n- `'"${version}"'`/' \
+  VERSIONING.md
 
 cargo check --quiet
 
-printf 'lay version -> %s\n' "$version"
+printf 'lay version: %s -> %s\n' "$current_version" "$version"

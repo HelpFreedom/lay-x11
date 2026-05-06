@@ -26,6 +26,8 @@ Check runtime cache load speed:
 cargo run --bin lay-ngram-corpus -- check-cache
 ```
 
-The generated corpus is built from local Hunspell words plus personal lay data
-from `~/.config/lay/protected_words.txt` and
-`~/.local/share/lay/corrections.jsonl`.
+By default the generated corpus is local-only and ignored by git. The builder
+can optionally mix Hunspell words with private user sources such as
+`~/.config/lay/protected_words.txt` and
+`~/.local/share/lay/corrections.jsonl`; do not publish generated corpus files
+that were built from personal corrections.
