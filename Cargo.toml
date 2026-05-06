@@ -1,10 +1,10 @@
 [package]
 name = "lay"
-version = "0.1.115"
+version = "0.1.116"
 edition = "2021"
 description = "Double Shift layout rescue for Linux/GNOME Wayland"
 license = "MIT"
-repository = "https://github.com/radislabus-star/lay"
+repository = "https://github.com/radislabus-star/lay-public"
 readme = "README.md"
 rust-version = "1.75"
 keywords = ["keyboard", "gnome", "wayland", "layout", "russian"]

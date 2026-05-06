@@ -11,7 +11,7 @@ project treats each pushed commit as the version step.
 
 Current publication branch version:
 
-- `0.1.115`
+- `0.1.116`
 
 Do not rely on stale commit counts from this file. Before publishing or pushing,
 run the bump script or verify the version fields manually.

@@ -2,9 +2,11 @@
 
 # lay
 
+**Спасатель неправильной RU/EN раскладки для Linux/GNOME Wayland**
+
 **Double Shift layout rescue for Linux/GNOME Wayland**
 
-Typed a word in the wrong keyboard layout? Press **Shift twice** and keep typing.
+Напечатал слово не в той раскладке? Нажми **Shift два раза** и продолжай писать.
 
 [![Rust](https://img.shields.io/badge/Rust-1.75+-orange?logo=rust)](https://www.rust-lang.org/)
 [![GNOME](https://img.shields.io/badge/GNOME-45--47%2C%2050-4A86CF?logo=gnome)](https://gnome.org/)
@@ -13,71 +15,75 @@ Typed a word in the wrong keyboard layout? Press **Shift twice** and keep typing
 
 </div>
 
-`lay` is a lightweight keyboard helper for Linux users who type in two layouts,
-especially RU/EN. Its main feature is simple:
+## Русский
+
+`lay` — маленький клавиатурный помощник для Linux-пользователей, которые часто
+пишут в двух раскладках, прежде всего **русской и английской**.
+
+Главный сценарий простой:
 
 ```text
-Typed:   Ghbdtn
-Press:   Shift Shift
-Result:  Привет
+Напечатал: Ghbdtn
+Нажал:     Shift Shift
+Получил:   Привет
 ```
 
-It does not try to guess everything while you type. The default workflow is
-manual and predictable: make a layout mistake, press double Shift, and `lay`
-retypes the last word in the other layout.
+`lay` не пытается “угадать всё за тебя”. Базовое поведение ручное и
+предсказуемое: ошибся раскладкой, нажал двойной Shift, последнее слово
+перепечаталось в другой раскладке.
 
-`lay` is built for GNOME Wayland. It uses Rust, evdev/uinput, and a small GNOME
-Shell extension for layout switching.
+Проект сделан под **GNOME Wayland**. Внутри: Rust, evdev/uinput и небольшое
+расширение GNOME Shell для переключения раскладки.
 
-## Features
+### Возможности
 
-- Double Shift fixes the last word typed in the wrong layout.
-- Works directly in applications, without clipboard-based replacement.
-- GNOME Wayland support through a small Shell extension.
-- Fast Rust CLI for one-off conversion and scripts.
-- Optional conservative typing assist after Space.
-- Optional exact auto-replace rules.
-- Local-first design: no cloud service and no network call in the normal path.
+- Двойной Shift исправляет последнее слово, набранное не в той раскладке.
+- Работает прямо в приложениях, без копирования текста через буфер обмена.
+- Поддерживает GNOME Wayland через маленькое Shell-расширение.
+- Есть быстрый CLI для конвертации текста из терминала.
+- Есть аккуратная помощь при наборе после пробела.
+- Есть точная автоподмена по пользовательскому словарю.
+- Основной режим локальный: без облака, без сетевых запросов и без модели.
 
-## Status
+### Статус
 
-This is an early public/beta project.
+Это ранняя публичная beta-версия.
 
-The primary tested setup is Ubuntu/GNOME on Wayland with RU/EN layouts. The
-extension declares GNOME Shell 45, 46, 47, and 50 support. Other GNOME versions,
-distributions, KDE, Sway, Hyprland, and non-RU layouts may need extra work.
+Основная проверенная среда: Ubuntu/GNOME Wayland с RU/EN раскладками.
+Расширение заявляет поддержку GNOME Shell 45, 46, 47 и 50. Другие версии GNOME,
+дистрибутивы, KDE, Sway, Hyprland и раскладки кроме RU/EN могут потребовать
+доработок.
 
-Bug reports and real typing examples are welcome, but please remove private
-text before sharing logs or reproduction cases.
+Если присылаешь баг-репорт или пример набора, сначала убери приватный текст.
 
-## Quick Start
+### Установка
 
 ```bash
-git clone https://github.com/radislabus-star/lay.git ~/projects/lay
+git clone https://github.com/radislabus-star/lay-public.git ~/projects/lay
 cd ~/projects/lay
 bash install.sh
 ```
 
-After installation, log out and log back in so the `input` group and GNOME
-extension are picked up.
+После установки выйди из сессии и зайди снова. Это нужно, чтобы применились
+группа `input` и расширение GNOME.
 
-Then type a word in the wrong layout and press **Shift twice**.
+Потом набери слово не в той раскладке и нажми **Shift два раза**.
 
-## Requirements
+### Требования
 
 - Linux
-- GNOME Shell 45, 46, 47, or 50
-- Wayland session
+- GNOME Shell 45, 46, 47 или 50
+- Wayland-сессия
 - Rust 1.75+
-- Access to `/dev/input` through the `input` group
-- `uinput` support
+- доступ к `/dev/input` через группу `input`
+- поддержка `uinput`
 
-The installer can add the current user to the `input` group, but the group
-change only applies after a new login session.
+Установщик может добавить текущего пользователя в группу `input`, но это
+начинает работать только после нового входа в систему.
 
-## CLI
+### CLI
 
-`lay` can also convert text from the terminal:
+`lay` можно использовать и из терминала:
 
 ```bash
 lay "Ye djn ghbvth"
@@ -92,14 +98,14 @@ echo "ghbdtn" | lay
 lay --clipboard
 ```
 
-The CLI is useful for scripts, quick checks, and clipboard conversion.
+CLI удобен для быстрых проверок, скриптов и конвертации буфера обмена.
 
-## Daemon
+### Демон
 
-`lay-daemon` is the background service that makes double Shift work in real
-applications.
+`lay-daemon` — фоновый сервис, который делает двойной Shift рабочим в обычных
+приложениях.
 
-Useful commands:
+Полезные команды:
 
 ```bash
 systemctl --user status lay-daemon --no-pager
@@ -108,71 +114,73 @@ systemctl --user stop lay-daemon
 journalctl --user -u lay-daemon -n 120 --no-pager
 ```
 
-## GNOME Extension
+### GNOME-расширение
 
-The daemon reads physical keyboard events and replays keycodes, but layout
-switching on GNOME Wayland requires GNOME Shell integration. The extension lives
-in:
+Демон читает физические клавиши и перепроигрывает keycode-события, но на GNOME
+Wayland переключение раскладки требует интеграции с GNOME Shell.
+
+Исходники расширения:
 
 ```text
 extension/lay@radislabus-star.github.io/
 ```
 
-The installer copies it to:
+Установленная копия:
 
 ```text
 ~/.local/share/gnome-shell/extensions/lay@radislabus-star.github.io/
 ```
 
-## Tray Menu
+### Меню в трее
 
-The GNOME tray menu keeps the public path short:
+Меню держит основной сценарий коротким:
 
-- `Main`: enable the standard Double Shift trigger
-- `Assist`: typing assist and exact auto-replace
-- `Data`: opt-in saving of accepted corrections
-- `Service`: daemon stop/start
-- `Advanced`: optional LLM mode, 1/2-word scope, timing, and alternative triggers
+- `Главное`: обычный триггер Double Shift;
+- `Исправлять`: помощь при наборе и точная автоподмена;
+- `Данные`: опциональное запоминание подтверждённых исправлений;
+- `Сервис`: остановка и запуск демона;
+- `Ещё`: LLM-эксперименты, 1/2 слова, тайминги и альтернативные триггеры.
 
-Production mode does not expose a text log button.
+В публичном режиме нет кнопки для открытия сырого debug-лога.
 
-## How It Works
+### Как это работает
 
-When double Shift is detected:
+При двойном Shift:
 
 ```text
-physical keyboard -> evdev -> lay-daemon
-                              |
-                              v
-                       current word buffer
-                              |
-                              v
-                    Backspace x word length
-                              |
-                              v
-                 GNOME extension switches layout
-                              |
-                              v
-                  uinput replays original keycodes
+физическая клавиатура -> evdev -> lay-daemon
+                                  |
+                                  v
+                           буфер текущего слова
+                                  |
+                                  v
+                        Backspace x длина слова
+                                  |
+                                  v
+                 GNOME extension переключает раскладку
+                                  |
+                                  v
+                    uinput повторяет исходные keycode
 ```
 
-This means the same physical keys are typed again under the other layout. That
-is why `Ghbdtn` becomes `Привет` without touching the clipboard.
+То есть `lay` не вставляет “готовое слово” из облака или буфера. Он повторяет
+те же физические клавиши уже под другой раскладкой. Поэтому `Ghbdtn` становится
+`Привет`.
 
-## Optional Typing Assist
+### Помощь при наборе
 
-`lay` can also run a conservative helper after Space. This is separate from the
-main double Shift workflow.
+Дополнительно `lay` умеет после пробела запускать консервативный помощник.
+Это отдельная функция, не основной double-Shift сценарий.
 
-Typing assist is designed to be quiet:
+Помощник специально осторожный:
 
-- it checks only completed words;
-- it fixes only high-confidence local mistakes;
-- it uses exact rules, dictionaries, and a small char n-gram scorer;
-- it does not rewrite style or generate new text;
-- if it is not sure, it does nothing.
+- проверяет только завершённые слова;
+- исправляет только уверенные локальные ошибки;
+- использует точные правила, словари и char n-gram scorer;
+- не переписывает стиль и не генерирует новый текст;
+- если не уверен, ничего не делает.
 
-Examples of intended corrections:
+Примеры задуманных исправлений:
 
 ```text
 ошисбя -> ошибся
@@ -180,7 +188,7 @@ Examples of intended corrections:
 плозо  -> плохо
 ```
 
-Enable or disable it from the tray menu:
+Включается и выключается в трее:
 
 ```json
 {
@@ -188,15 +196,15 @@ Enable or disable it from the tray menu:
 }
 ```
 
-## Auto-Replace Rules
+### Автоподмена
 
-Exact replacements can be configured in:
+Точные автоподмены лежат здесь:
 
 ```text
 ~/.config/lay/replacements.json
 ```
 
-Example:
+Пример:
 
 ```json
 {
@@ -205,96 +213,150 @@ Example:
 }
 ```
 
-This feature is intentionally exact. Fuzzy matching belongs to typing assist,
-not to the replacement dictionary.
+Это именно точные правила. Нечёткие исправления относятся к typing assist, а не
+к словарю автоподмены.
 
-## Privacy
+### Приватность
 
-Keyboard tools deserve extra suspicion. `lay-daemon` sees keyboard events, so
-the project tries to keep the data model boring and local.
+К клавиатурным инструментам нужно относиться подозрительно. `lay-daemon` видит
+клавиатурные события, поэтому модель данных сделана максимально скучной и
+локальной.
 
-By default, `lay` does not send typed text anywhere. The normal double Shift
-path does not require network access, cloud APIs, or a remote model.
+По умолчанию `lay` никуда не отправляет набранный текст. Нормальный путь
+double Shift не требует сети, облачных API или удалённой модели.
 
-Optional learning logs are local and should contain accepted correction pairs,
-not the full stream of typed text. They are disabled by default and can be
-enabled from the tray menu with `Data -> Remember corrections`:
+Опциональный learning log локальный. Он должен хранить пары подтверждённых
+исправлений, а не полный поток набора. По умолчанию он выключен и включается в
+трее через `Данные -> Запоминать правки`:
 
 ```text
 ~/.local/share/lay/corrections.jsonl
 ```
 
-Diagnostic output is also disabled by default. Developers can enable it
-explicitly with `lay-daemon --debug-log` or `LAY_DEBUG_LOG=1`.
+Диагностический вывод тоже выключен по умолчанию. Разработчик может включить
+его явно через `lay-daemon --debug-log` или `LAY_DEBUG_LOG=1`.
 
-The GNOME extension exposes a session-local DBus bridge so `lay-daemon` can
-switch layouts and insert fallback text. This is not a security boundary against
-other processes running as the same desktop user. Public input methods are kept
-small: direct `Backspace` and `ReplaceLastN` DBus methods are not exported.
+GNOME-расширение публикует session-local DBus bridge, чтобы `lay-daemon` мог
+переключать раскладку и делать fallback-вставку текста. Это не является
+security boundary против других процессов того же desktop-пользователя.
 
-You can stop the daemon at any time:
+Остановить демон можно в любой момент:
 
 ```bash
 systemctl --user stop lay-daemon
 ```
 
-## Smart/LLM Mode
+### Smart/LLM режим
 
-There is an experimental `--smart` mode that can use a local model as an
-arbiter between prepared candidates.
+Есть экспериментальный `--smart` режим, где локальная модель может быть
+арбитром между уже подготовленными кандидатами.
 
-It is not the main product path, it is not required for double Shift, and it is
-not enabled for normal typing rescue.
+Это не главный путь продукта, не обязательная часть double Shift и не включено
+для обычного исправления раскладки.
 
-Tray `Advanced -> LLM` affects only `lay-daemon`. The terminal CLI uses model
-logic only when `--smart` is passed.
+`Ещё -> LLM` в трее влияет только на `lay-daemon`. CLI использует модельную
+логику только если передан `--smart`.
 
-The default build does not compile the direct GGUF backend and does not load a
-model at startup. To use Ollama for experiments:
+Обычная сборка не компилирует direct GGUF backend и не грузит модель при
+старте. Для экспериментов с Ollama:
 
 ```bash
 LAY_LLM_BACKEND=ollama lay --smart "fyukbqcrbq"
 ```
 
-To build the optional direct GGUF backend:
+Для optional direct GGUF backend:
 
 ```bash
 cargo build --release --features direct-llm
 LAY_LLM_BACKEND=direct LAY_GGUF_MODEL=/path/to/model.gguf lay --smart "fyukbqcrbq"
 ```
 
-```bash
-lay --smart "fyukbqcrbq"
-```
-
-## Development
+### Разработка
 
 ```bash
 cargo test
 cargo build --release
 ```
 
-N-gram corpus helpers:
+N-gram helpers:
 
 ```bash
 cargo run --bin lay-ngram-corpus -- check-cache
 cargo run --bin lay-ngram-corpus -- check --corpus corpus/ru_50mb.txt
 ```
 
-Install the current build locally:
+Установка текущей сборки локально:
 
 ```bash
 bash install.sh
 ```
 
-## Roadmap
+### Roadmap
 
-- Better public installer and uninstall command.
-- A short demo GIF/video for the double Shift workflow.
-- More regression tests from accepted/rejected real corrections.
-- Safer defaults and clearer privacy controls.
-- KDE/Sway/Hyprland research.
-- More layouts after RU/EN is stable.
+- Более аккуратный public installer и uninstall-команда.
+- Короткий demo GIF/video для double Shift.
+- Больше регрессионных тестов из реальных принятых/отклонённых исправлений.
+- Ещё более понятные privacy-настройки.
+- Исследование KDE/Sway/Hyprland.
+- Другие раскладки после стабилизации RU/EN.
+
+## English
+
+`lay` is a lightweight keyboard helper for Linux users who type in two layouts,
+especially **RU/EN**.
+
+The main workflow:
+
+```text
+Typed:   Ghbdtn
+Press:   Shift Shift
+Result:  Привет
+```
+
+`lay` is built for GNOME Wayland. It uses Rust, evdev/uinput, and a small GNOME
+Shell extension for layout switching. The normal path is local-first: no cloud
+service, no network call, and no model required.
+
+Quick install:
+
+```bash
+git clone https://github.com/radislabus-star/lay-public.git ~/projects/lay
+cd ~/projects/lay
+bash install.sh
+```
+
+After installation, log out and log back in so the `input` group and GNOME
+extension are picked up.
+
+Supported/tested target:
+
+- Linux
+- GNOME Shell 45, 46, 47, or 50
+- Wayland session
+- Rust 1.75+
+- RU/EN layouts
+
+Useful CLI examples:
+
+```bash
+lay "Ye djn ghbvth"
+# Ну вот пример
+
+lay "руддщ цщкдв"
+# hello world
+
+echo "ghbdtn" | lay
+# привет
+```
+
+Privacy summary: `lay-daemon` reads keyboard events locally to provide the
+double-Shift workflow. By default it does not send typed text anywhere, does not
+require a remote model, and does not keep a full keylog. Optional learning logs
+are local and disabled by default.
+
+Experimental Smart/LLM mode exists, but it is not the default product path. The
+default build does not compile direct GGUF support. Use `--features direct-llm`
+and explicit `LAY_LLM_BACKEND=direct` only for local model experiments.
 
 ## License
 
