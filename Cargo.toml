@@ -1,0 +1,48 @@
+[package]
+name = "lay"
+version = "0.1.115"
+edition = "2021"
+description = "Double Shift layout rescue for Linux/GNOME Wayland"
+license = "MIT"
+repository = "https://github.com/radislabus-star/lay"
+readme = "README.md"
+rust-version = "1.75"
+keywords = ["keyboard", "gnome", "wayland", "layout", "russian"]
+categories = ["command-line-utilities"]
+
+[features]
+default = []
+direct-llm = ["dep:llama_cpp"]
+
+[[bin]]
+name = "lay"
+path = "src/main.rs"
+
+[[bin]]
+name = "lay-daemon"
+path = "src/bin/lay_daemon.rs"
+
+[[bin]]
+name = "lay-test-input"
+path = "src/bin/lay_test_input.rs"
+
+[[bin]]
+name = "lay-ngram-corpus"
+path = "src/bin/lay_ngram_corpus.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+arboard = "3"
+ureq = { version = "2", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+evdev = "0.13"
+zbus = "5.15.0"
+llama_cpp = { version = "0.3.2", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

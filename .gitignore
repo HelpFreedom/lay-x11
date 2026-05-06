@@ -1,0 +1,14 @@
+/target
+/SKILL.md
+*.deb
+*.log
+*.jsonl
+__pycache__/
+.env
+.env.*
+/dist
+/models
+/corpus/*.txt
+/corpus/*.arpa
+/corpus/*.bin
+/corpus/*.model
