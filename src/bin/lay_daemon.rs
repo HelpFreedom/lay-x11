@@ -968,6 +968,46 @@ impl WordBuffer {
         false
     }
 
+    fn remember_replacement_last_word_for_replay(
+        &mut self,
+        original_events: &[KeyEvent],
+        plan: &TextReplacement,
+        replacement: &str,
+    ) -> bool {
+        if plan.move_right != 0 || plan.backspaces == 0 {
+            return false;
+        }
+
+        let Some(inserted_word) = replacement.split_whitespace().next_back() else {
+            return false;
+        };
+        if inserted_word.is_empty() {
+            return false;
+        }
+
+        let Some(words) = split_event_words(original_events) else {
+            return false;
+        };
+        for word in words.iter().rev() {
+            for target_is_ru in [false, true] {
+                if map_events_to_layout(word, target_is_ru) != inserted_word {
+                    continue;
+                }
+
+                let mut tail = (*word).to_vec();
+                mark_word_layout(&mut tail, target_is_ru);
+                self.current = tail;
+                self.prev_words.clear();
+                self.prev_had_trailing_space = false;
+                self.replay_toggle_ready = true;
+                self.last_input = Instant::now();
+                return true;
+            }
+        }
+
+        false
+    }
+
     fn remember_pending_learning_correction(
         &mut self,
         lay_kind: &str,
@@ -1416,11 +1456,13 @@ fn handle_double_shift(
                     replace_words,
                     words_orig,
                 );
-                if !buf.remember_inserted_tail_for_replay(
-                    &events,
-                    &plan,
-                    preferred_layout_for_text(&plan.insert, insert_target_is_ru),
-                ) && !buf.remember_inserted_last_word_for_replay(&events, &plan)
+                if !buf.remember_replacement_last_word_for_replay(&events, &plan, &text)
+                    && !buf.remember_inserted_tail_for_replay(
+                        &events,
+                        &plan,
+                        preferred_layout_for_text(&plan.insert, insert_target_is_ru),
+                    )
+                    && !buf.remember_inserted_last_word_for_replay(&events, &plan)
                 {
                     buf.reset_all();
                 }
@@ -3135,6 +3177,10 @@ fn flip_word_events(word: &[KeyEvent]) -> String {
     if let Some(repaired) = repair_cyrillic_prefix_before_ascii_tail(word) {
         return repaired;
     }
+    let original = map_original_events(word);
+    if let Some(repaired) = correct_duplicate_layout_prefix_on_ascii_token(&original) {
+        return repaired;
+    }
     if let Some(target_is_ru) = mixed_visual_latin_word_target_layout(word) {
         return map_events_to_layout(word, target_is_ru);
     }
@@ -3165,6 +3211,10 @@ fn repair_cyrillic_prefix_before_ascii_tail(word: &[KeyEvent]) -> Option<String>
     }
 
     let all_ru = map_events_to_layout(word, true);
+    if all_ru != map_original_events(word) && is_known_cyrillic_hyphenated_word(&all_ru) {
+        return Some(all_ru);
+    }
+
     let mut chars = all_ru.chars();
     let first_ru = chars.next()?;
     let second_ru = chars.next()?;
@@ -3191,7 +3241,25 @@ fn is_known_cyrillic_hyphenated_word(word: &str) -> bool {
     }
     let dict = russian_short_dictionary();
     word.split('-')
-        .all(|part| part.chars().count() >= 3 && dict.contains(&part.to_lowercase()))
+        .all(|part| part.chars().count() >= 3 && is_known_cyrillic_hyphen_part(part, dict))
+}
+
+fn is_known_cyrillic_hyphen_part(part: &str, dict: &HashSet<String>) -> bool {
+    let lower = part.to_lowercase();
+    dict.contains(&lower)
+        || russian_generated_form_dictionary().contains(&lower)
+        || is_known_short_accusative_a_form(&lower, dict)
+}
+
+fn is_known_short_accusative_a_form(word: &str, dict: &HashSet<String>) -> bool {
+    let Some(stem) = word.strip_suffix('у') else {
+        return false;
+    };
+    if stem.chars().count() < 2 {
+        return false;
+    }
+    let lemma = format!("{stem}а");
+    dict.contains(&lemma)
 }
 
 fn is_known_russian_word_or_form(word: &str) -> bool {
@@ -5217,6 +5285,66 @@ mod tests {
             decide_scoped_tail_correction(&events),
             Some(format!("{left} {current_target}"))
         );
+    }
+
+    #[test]
+    fn scoped_tail_repairs_mixed_cyrillic_prefix_ascii_hyphen_word_and_keeps_undo() {
+        let mut buffer = WordBuffer::new();
+        push_text_as_layout(&mut buffer, "Иракскую", true);
+        buffer.handle_space();
+        buffer.push(text_key_event('к', true));
+        for ch in "jrf-rjke".chars() {
+            buffer.push(text_key_event(ch, false));
+        }
+
+        let (events, _) = buffer.what_to_replay(2).expect("two-word tail");
+        let original = map_original_events(&events);
+        let replacement = decide_scoped_tail_correction(&events).expect("smart replacement");
+        let plan = plan_text_replacement(&original, &replacement).expect("minimal plan");
+
+        assert_eq!(original, "Иракскую кjrf-rjke");
+        assert_eq!(replacement, "Иракскую кока-колу");
+        assert_eq!(
+            plan,
+            TextReplacement {
+                move_left: 0,
+                backspaces: 8,
+                insert: "ока-колу".to_string(),
+                move_right: 0,
+            }
+        );
+        assert!(buffer.remember_replacement_last_word_for_replay(&events, &plan, &replacement));
+
+        let (undo_events, undo_backspaces) = buffer.what_to_replay(2).expect("undo tail");
+        let undo_decision = replay_layout_decision(&undo_events);
+        assert_eq!(map_original_events(&undo_events), "кока-колу");
+        assert_eq!(undo_backspaces, 9);
+        assert!(!undo_decision.target_is_ru);
+        assert_eq!(map_events_to_layout(&undo_events, false), "rjrf-rjke");
+        assert!(buffer.replay_toggle_ready());
+    }
+
+    #[test]
+    fn replacement_last_word_memory_ignores_middle_insert_plan() {
+        let mut buffer = WordBuffer::new();
+        push_text_as_layout(&mut buffer, "AmoCRM", false);
+        buffer.handle_space();
+        push_text_as_layout(&mut buffer, "Z", false);
+        buffer.handle_space();
+        push_text_as_layout(&mut buffer, "тут", true);
+        buffer.handle_space();
+        push_text_as_layout(&mut buffer, "задача", true);
+
+        let (events, _) = buffer.what_to_replay(4).expect("four-word tail");
+        let plan = plan_text_replacement("AmoCRM Z тут задача", "AmoCRM Я тут задача")
+            .expect("middle replacement plan");
+
+        assert_eq!(plan.move_right, 11);
+        assert!(!buffer.remember_replacement_last_word_for_replay(
+            &events,
+            &plan,
+            "AmoCRM Я тут задача"
+        ));
     }
 
     #[test]

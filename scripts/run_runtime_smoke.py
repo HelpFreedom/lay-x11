@@ -37,6 +37,8 @@ CASES = {
     "good_text_enter": Case("good_text_enter", "good текст"),
     "good_vshgidu_enter": Case("good_vshgidu_enter", "good Double"),
     "mixed_word": Case("mixed_word", "при"),
+    "mixed_coke_enter": Case("mixed_coke_enter", "слово кока-колу"),
+    "mixed_coke_toggle3_enter": Case("mixed_coke_toggle3_enter", "слово кока-колу"),
     "n_teper_mixed_enter": Case("n_teper_mixed_enter", "Теперь"),
     "proverka_ntrcn_enter": Case("proverka_ntrcn_enter", "проверка текст"),
     "vyvodim_dva_enter": Case("vyvodim_dva_enter", "выводим два"),

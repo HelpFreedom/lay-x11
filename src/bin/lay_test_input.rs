@@ -20,6 +20,8 @@
 //!   lay-test-input good_text_enter — печатает "пщщв ntrcn" + двойной Shift + Enter
 //!   lay-test-input wifi_ye_enter — печатает "wi-fi ye" + двойной Shift + Enter
 //!   lay-test-input vyvodim_dva_enter — печатает "dsdjlbv ldf" + двойной Shift + Enter
+//!   lay-test-input mixed_coke_enter — печатает "слово кjrf-rjke" + двойной Shift + Enter
+//!   lay-test-input mixed_coke_toggle3_enter — печатает "слово кjrf-rjke" + двойной Shift × 3 + Enter
 //!   lay-test-input параллелепипед_long — длинное нижнерегистровое слово + Shift + Enter
 //!   lay-test-input list        — только создаёт kbd и держит, печатает путь
 
@@ -434,6 +436,18 @@ fn main() -> std::io::Result<()> {
             double_shift_enter(&mut dev, 900)?;
             eprintln!("[test] сценарий vyvodim_dva_enter отправлен");
         }
+        "mixed_coke_enter" => {
+            type_mixed_coke_tail(&mut dev)?;
+            double_shift_enter(&mut dev, 900)?;
+            eprintln!("[test] сценарий mixed_coke_enter отправлен");
+        }
+        "mixed_coke_toggle3_enter" => {
+            type_mixed_coke_tail(&mut dev)?;
+            double_shift(&mut dev, 900)?;
+            double_shift(&mut dev, 900)?;
+            double_shift_enter(&mut dev, 900)?;
+            eprintln!("[test] сценарий mixed_coke_toggle3_enter отправлен");
+        }
         "mixed_word" => {
             tap(&mut dev, KeyCode::KEY_G.code())?;
             sleep(Duration::from_millis(50));
@@ -461,6 +475,40 @@ fn main() -> std::io::Result<()> {
     }
 
     Ok(())
+}
+
+fn type_mixed_coke_tail(dev: &mut VirtualDevice) -> std::io::Result<()> {
+    activate_layout("ru");
+    sleep(Duration::from_millis(250));
+    tap_keys(
+        dev,
+        &[
+            KeyCode::KEY_C,
+            KeyCode::KEY_K,
+            KeyCode::KEY_J,
+            KeyCode::KEY_D,
+            KeyCode::KEY_J,
+            KeyCode::KEY_SPACE,
+            KeyCode::KEY_R,
+        ],
+        35,
+    )?;
+    activate_layout("us");
+    sleep(Duration::from_millis(250));
+    tap_keys(
+        dev,
+        &[
+            KeyCode::KEY_J,
+            KeyCode::KEY_R,
+            KeyCode::KEY_F,
+            KeyCode::KEY_MINUS,
+            KeyCode::KEY_R,
+            KeyCode::KEY_J,
+            KeyCode::KEY_K,
+            KeyCode::KEY_E,
+        ],
+        35,
+    )
 }
 
 fn activate_layout(id: &str) {
@@ -507,12 +555,17 @@ fn tap_keys(dev: &mut VirtualDevice, keys: &[KeyCode], pause_ms: u64) -> std::io
 }
 
 fn double_shift_enter(dev: &mut VirtualDevice, settle_ms: u64) -> std::io::Result<()> {
+    double_shift(dev, settle_ms)?;
+    tap(dev, KeyCode::KEY_ENTER.code())?;
+    Ok(())
+}
+
+fn double_shift(dev: &mut VirtualDevice, settle_ms: u64) -> std::io::Result<()> {
     sleep(Duration::from_millis(220));
     tap(dev, KeyCode::KEY_LEFTSHIFT.code())?;
     sleep(Duration::from_millis(80));
     tap(dev, KeyCode::KEY_LEFTSHIFT.code())?;
     sleep(Duration::from_millis(settle_ms));
-    tap(dev, KeyCode::KEY_ENTER.code())?;
     Ok(())
 }
 
