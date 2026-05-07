@@ -375,23 +375,14 @@ fn listen_keyboard(
             // Clutter virtual device (TypeText fallback) создаёт evdev-устройство
             // которое мы тоже слушаем → feedback loop: TypeText-события попадают
             // обратно в буфер. Блокируем ВСЕ ключи пока executing=true.
-            // shift_state обновляем всё равно — чтобы не рассинхронизироваться.
+            // modifier state обновляем всё равно — чтобы не рассинхронизироваться.
             if executing {
-                if key == KeyCode::KEY_LEFTSHIFT {
-                    shift_state.left = value != 0;
-                }
-                if key == KeyCode::KEY_RIGHTSHIFT {
-                    shift_state.right = value != 0;
-                }
+                shift_state.update(key, value);
                 continue;
             }
 
             // ─── modifier tracking ────────────────────────────
-            if key == KeyCode::KEY_LEFTSHIFT {
-                shift_state.left = value != 0;
-            } else if key == KeyCode::KEY_RIGHTSHIFT {
-                shift_state.right = value != 0;
-            }
+            shift_state.update(key, value);
 
             // ═══ FSM: press→release→press→release = DOUBLE TRIGGER ════
             // RShift и RAlt не участвуют в FSM
@@ -638,6 +629,13 @@ fn listen_keyboard(
                 continue;
             }
 
+            if should_ignore_buffer_key(key, &shift_state, buffer.current.is_empty()) {
+                if verbose {
+                    log(&format!("· key {code} ignored for buffer (shortcut/noise)"));
+                }
+                continue;
+            }
+
             // ─── пробел: переносим current → prev (только на press) ──
             if key == KeyCode::KEY_SPACE {
                 if value == 1 {
@@ -739,10 +737,40 @@ fn listen_keyboard(
 struct ShiftState {
     left: bool,
     right: bool,
+    left_ctrl: bool,
+    right_ctrl: bool,
+    left_alt: bool,
+    right_alt: bool,
+    left_meta: bool,
+    right_meta: bool,
 }
 impl ShiftState {
+    fn update(&mut self, key: KeyCode, value: i32) {
+        let pressed = value != 0;
+        match key {
+            KeyCode::KEY_LEFTSHIFT => self.left = pressed,
+            KeyCode::KEY_RIGHTSHIFT => self.right = pressed,
+            KeyCode::KEY_LEFTCTRL => self.left_ctrl = pressed,
+            KeyCode::KEY_RIGHTCTRL => self.right_ctrl = pressed,
+            KeyCode::KEY_LEFTALT => self.left_alt = pressed,
+            KeyCode::KEY_RIGHTALT => self.right_alt = pressed,
+            KeyCode::KEY_LEFTMETA => self.left_meta = pressed,
+            KeyCode::KEY_RIGHTMETA => self.right_meta = pressed,
+            _ => {}
+        }
+    }
+
     fn any(&self) -> bool {
         self.left || self.right
+    }
+
+    fn shortcut_active(&self) -> bool {
+        self.left_ctrl
+            || self.right_ctrl
+            || self.left_alt
+            || self.right_alt
+            || self.left_meta
+            || self.right_meta
     }
 }
 
@@ -1238,6 +1266,18 @@ fn is_typing_key(key: KeyCode) -> bool {
             | K::KEY_MINUS
             | K::KEY_EQUAL
     )
+}
+
+fn should_ignore_buffer_key(key: KeyCode, modifiers: &ShiftState, current_empty: bool) -> bool {
+    if modifiers.shortcut_active() && (key == KeyCode::KEY_SPACE || is_typing_key(key)) {
+        return true;
+    }
+
+    current_empty && is_leading_non_word_symbol_key(key, modifiers.any())
+}
+
+fn is_leading_non_word_symbol_key(key: KeyCode, _shift: bool) -> bool {
+    matches!(key, KeyCode::KEY_EQUAL | KeyCode::KEY_MINUS)
 }
 
 // ─── Двойной Shift handler ──────────────────────────────────
@@ -4624,6 +4664,56 @@ mod tests {
                 mixed_layouts: false,
             }
         );
+    }
+
+    #[test]
+    fn shortcut_modified_text_keys_do_not_enter_word_buffer() {
+        let mut modifiers = ShiftState::default();
+
+        modifiers.update(KeyCode::KEY_LEFTCTRL, 1);
+        assert!(should_ignore_buffer_key(
+            KeyCode::KEY_EQUAL,
+            &modifiers,
+            true
+        ));
+        assert!(should_ignore_buffer_key(
+            KeyCode::KEY_MINUS,
+            &modifiers,
+            true
+        ));
+        assert!(should_ignore_buffer_key(
+            KeyCode::KEY_SPACE,
+            &modifiers,
+            true
+        ));
+        assert!(should_ignore_buffer_key(KeyCode::KEY_A, &modifiers, true));
+
+        modifiers.update(KeyCode::KEY_LEFTCTRL, 0);
+        assert!(!should_ignore_buffer_key(KeyCode::KEY_A, &modifiers, true));
+    }
+
+    #[test]
+    fn leading_plus_minus_symbols_do_not_attach_to_next_word() {
+        let mut buffer = WordBuffer::new();
+
+        for (key, shift) in [
+            (KeyCode::KEY_EQUAL, true),
+            (KeyCode::KEY_EQUAL, false),
+            (KeyCode::KEY_MINUS, true),
+            (KeyCode::KEY_MINUS, false),
+        ] {
+            let mut modifiers = ShiftState::default();
+            modifiers.update(KeyCode::KEY_LEFTSHIFT, i32::from(shift));
+            if !should_ignore_buffer_key(key, &modifiers, buffer.current.is_empty()) {
+                buffer.push(key_event(key, shift));
+            }
+        }
+        push_text_as_layout(&mut buffer, "есть", true);
+
+        let (events, backspaces) = buffer.what_to_replay(1).expect("word tail");
+
+        assert_eq!(map_original_events(&events), "есть");
+        assert_eq!(backspaces, 4);
     }
 
     #[test]

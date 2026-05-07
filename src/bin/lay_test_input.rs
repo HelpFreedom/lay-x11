@@ -8,6 +8,7 @@
 //!   lay-test-input scenario1   — печатает "ghbvth" + двойной Shift
 //!   lay-test-input ghbdtn_shift — печатает "ghbdtn" + двойной Shift
 //!   lay-test-input ghbdtn_enter — печатает "ghbdtn" + двойной Shift + Enter
+//!   lay-test-input ctrl_plus_ghbdtn_enter — жмёт Ctrl+Shift+=, затем "ghbdtn" + двойной Shift + Enter
 //!   lay-test-input dhtvz_toggle_enter — печатает "dhtvz" + двойной Shift × 2 + Enter
 //!   lay-test-input dhtvz_toggle3_enter — печатает "dhtvz" + двойной Shift × 3 + Enter
 //!   lay-test-input n_teper_mixed_enter — печатает "Nеперь" + двойной Shift + Enter
@@ -65,9 +66,11 @@ fn main() -> std::io::Result<()> {
         KeyCode::KEY_Z,
         KeyCode::KEY_SPACE,
         KeyCode::KEY_LEFTSHIFT,
+        KeyCode::KEY_LEFTCTRL,
         KeyCode::KEY_BACKSPACE,
         KeyCode::KEY_ENTER,
         KeyCode::KEY_MINUS,
+        KeyCode::KEY_EQUAL,
     ];
     for k in all {
         keys.insert(k);
@@ -134,6 +137,31 @@ fn main() -> std::io::Result<()> {
                 tap(&mut dev, KeyCode::KEY_ENTER.code())?;
             }
             eprintln!("[test] сценарий {scenario} отправлен");
+        }
+        "ctrl_plus_ghbdtn_enter" => {
+            activate_layout("us");
+            sleep(Duration::from_millis(250));
+            hold_two_tap(
+                &mut dev,
+                KeyCode::KEY_LEFTCTRL.code(),
+                KeyCode::KEY_LEFTSHIFT.code(),
+                KeyCode::KEY_EQUAL.code(),
+            )?;
+            sleep(Duration::from_millis(180));
+            tap_keys(
+                &mut dev,
+                &[
+                    KeyCode::KEY_G,
+                    KeyCode::KEY_H,
+                    KeyCode::KEY_B,
+                    KeyCode::KEY_D,
+                    KeyCode::KEY_T,
+                    KeyCode::KEY_N,
+                ],
+                50,
+            )?;
+            double_shift_enter(&mut dev, 900)?;
+            eprintln!("[test] сценарий ctrl_plus_ghbdtn_enter отправлен");
         }
         "dhtvz_toggle_enter" | "dhtvz_toggle3_enter" => {
             // печатает "dhtvz" и переключает его туда-сюда несколько раз.
@@ -575,5 +603,23 @@ fn hold_tap(dev: &mut VirtualDevice, hold_code: u16, tap_code: u16) -> std::io::
     tap(dev, tap_code)?;
     sleep(Duration::from_millis(20));
     dev.emit(&[InputEvent::new(EventType::KEY.0, hold_code, 0)])?;
+    Ok(())
+}
+
+fn hold_two_tap(
+    dev: &mut VirtualDevice,
+    first_hold_code: u16,
+    second_hold_code: u16,
+    tap_code: u16,
+) -> std::io::Result<()> {
+    dev.emit(&[InputEvent::new(EventType::KEY.0, first_hold_code, 1)])?;
+    sleep(Duration::from_millis(10));
+    dev.emit(&[InputEvent::new(EventType::KEY.0, second_hold_code, 1)])?;
+    sleep(Duration::from_millis(10));
+    tap(dev, tap_code)?;
+    sleep(Duration::from_millis(10));
+    dev.emit(&[InputEvent::new(EventType::KEY.0, second_hold_code, 0)])?;
+    sleep(Duration::from_millis(10));
+    dev.emit(&[InputEvent::new(EventType::KEY.0, first_hold_code, 0)])?;
     Ok(())
 }
