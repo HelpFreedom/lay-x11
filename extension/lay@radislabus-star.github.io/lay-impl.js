@@ -18,9 +18,9 @@ import {getInputSourceManager} from 'resource:///org/gnome/shell/ui/status/keybo
 
 const CONFIG_PATH = GLib.get_home_dir() + '/.config/lay/config.json';
 const STATS_PATH = GLib.get_home_dir() + '/.local/share/lay/stats.json';
-const APP_VERSION = '0.1.124';
+const APP_VERSION = '0.1.125';
 const APP_DESCRIPTION = 'Double Shift layout rescue for Linux/GNOME Wayland';
-const APP_RELEASE_DATE = '2026-05-09';
+const APP_RELEASE_DATE = '2026-05-10';
 const APP_LICENSE = 'MIT';
 const APP_URL = 'https://github.com/radislabus-star/lay-public';
 const APP_PLATFORM = 'GNOME Wayland';

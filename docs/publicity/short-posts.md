@@ -2,7 +2,9 @@
 
 ## Russian Telegram / Linux chat
 
-Сделал маленький open-source помощник для GNOME Wayland: `lay`.
+Сделал для себя маленький open-source помощник для GNOME Wayland: `lay`.
+Делюсь с миром — берите, кому тоже не хватает лёгкого double Shift исправления
+слов в RU/EN раскладке.
 
 Сценарий простой: набрал слово не в той RU/EN раскладке, нажал Shift два раза,
 слово перепечаталось в другой раскладке.
@@ -17,34 +19,38 @@ wi-fi ye   -> wi-fi ну
 extension для переключения раскладки. Обычный double Shift не использует облако,
 LLM или буфер обмена.
 
-Пока это beta под GNOME Wayland и RU/EN. Буду рад коротким воспроизводимым
-багам и идеям.
+Пока это beta под GNOME Wayland и RU/EN. Делал под свою боль, поэтому особенно
+буду рад коротким воспроизводимым багам от тех, кто тоже много печатает между
+русским и английским.
 
 GitHub:
 https://github.com/radislabus-star/lay-public
 
 ## Habr intro teaser
 
-Я несколько недель доводил до рабочего состояния маленькую утилиту для GNOME
-Wayland: нажимаешь Shift два раза, и слово, набранное не в той раскладке,
-перепечатывается правильно.
+Сделал для себя маленькую утилиту для GNOME Wayland и выкладываю в open source:
+кому нужна лёгкая замена Caramba/Punto-сценария под Linux, берите.
+
+Главная идея простая: нажимаешь Shift два раза, и слово, набранное не в той
+раскладке, перепечатывается правильно.
 
 Самое интересное оказалось не в `ghbdtn -> привет`, а в пограничных случаях:
 `good ntrcn`, `AmoCRM Z`, `wi-fi ye`, частичные слова, автопомощь после пробела
 и отказ от агрессивной LLM-магии.
 
-Ниже технический разбор архитектуры, ошибок и решений.
+Ниже технический разбор архитектуры, ошибок и решений без попытки делать из
+этого большой продукт.
 
-## Reddit / r/gnome
+## OpenNET / Linux.org.ru style
 
-I built a small local keyboard helper for GNOME Wayland because I kept typing
-Russian text in the English layout.
+Сделал для себя и выложил в open source `lay` — лёгкий помощник раскладки для
+GNOME Wayland.
 
-It listens to physical key events, keeps a small word buffer, and on double
-Shift replays the same keycodes under the other layout. The normal path does not
-use the clipboard or a cloud service.
+Что делает: если слово набрано не в той RU/EN раскладке, нажимаешь Shift два
+раза, и оно перепечатывается в другой раскладке. Основной путь локальный, без
+облака, буфера обмена и LLM.
 
-Examples:
+Примеры:
 
 ```text
 ghbdtn      -> привет
@@ -52,23 +58,8 @@ good ntrcn -> good текст
 wi-fi ye   -> wi-fi ну
 ```
 
-It is still beta and mostly RU/EN-focused, but it is already useful for my daily
-typing. I would appreciate feedback from GNOME Wayland users.
+Проект beta, делался под личную боль после Caramba на Windows. Если кому надо —
+берите, тестируйте, присылайте короткие воспроизводимые баги.
 
-Repo:
+GitHub:
 https://github.com/radislabus-star/lay-public
-
-Disclosure: I am the author.
-
-## DEV.to / social intro
-
-I built `lay`, a local double-Shift layout rescue tool for GNOME Wayland.
-
-The fun part was not converting `ghbdtn` to `привет`, but avoiding damage in
-mixed text like `good ntrcn`, `AmoCRM Z`, and `wi-fi ye`.
-
-Rust daemon, evdev/uinput, GNOME Shell extension, local-first, no cloud required
-for the normal path.
-
-https://github.com/radislabus-star/lay-public
-

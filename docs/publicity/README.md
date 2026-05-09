@@ -1,37 +1,54 @@
-# lay publicity pack
+# Пакет публикации lay
 
-This folder contains publication drafts and small promotional assets for `lay`.
+Здесь лежат русскоязычные материалы для первой публичной волны `lay`.
 
-Included assets:
+Главный месседж:
 
-- `cover.svg` - editable article cover.
-- `cover.png` - 1600 x 900 raster cover for platforms that do not accept SVG.
+```text
+Делал для себя, делюсь с миром.
+Берите, кому нужно лёгкое исправление слов по double Shift.
+```
 
-Recommended author nickname:
+## Файлы
+
+- `habr-article-ru.md` — основная статья для Хабра.
+- `habr-form-ru.md` — готовые поля формы публикации на Хабре.
+- `short-posts.md` — короткие русские анонсы для чатов/форумов.
+- `tproger-pitch-ru.md` — короткое письмо/питч для русских техмедиа.
+- `platforms-ru.md` — порядок и логика русских площадок.
+- `cover.svg` — редактируемая обложка.
+- `cover.png` — обложка 1600 x 900 для площадок, где SVG неудобен.
+- `demo.gif` — короткое визуальное демо для README/статьи.
+
+## Ник автора
 
 ```text
 radislabus-star
 ```
 
-Why this nickname:
+Почему так:
 
-- it matches the GitHub account and project URL;
-- it is neutral and project-owned;
-- it does not pretend to be a company or a GNOME team account.
+- совпадает с GitHub-аккаунтом и URL проекта;
+- выглядит нейтрально;
+- не притворяется компанией или официальной командой GNOME.
 
-## Publishing order
+## Порядок публикации
 
-1. Add a short demo GIF/video to the GitHub README.
-2. Publish `habr-article-ru.md` on Habr as a technical story, not as an ad.
-3. Post short announcements from `short-posts.md` in Russian Linux/GNOME chats.
-4. Adapt `devto-article-en.md` for DEV.to after the Russian article is stable.
-5. Use Reddit only after the article exists, with disclosure that you are the author.
+1. GitHub README + release должны выглядеть готовыми.
+2. На Хабре публикуется `habr-article-ru.md`.
+3. В русские Linux/GNOME чаты уходит короткий анонс из `short-posts.md`.
+4. Если реакция хорошая, отправляется `tproger-pitch-ru.md`.
+5. OpenNET/Linux.org.ru используются только как короткие русские анонсы/новости,
+   без копирования всей статьи.
 
-## Account notes
+Английские площадки вроде DEV.to/Reddit сейчас не цель. Первая аудитория —
+русскоязычные пользователи Linux/GNOME, которым реально знакома боль RU/EN
+раскладки.
 
-Text, images, tags, release notes, and submission forms can be prepared in
-advance, but account registration still needs a real email, password manager,
-and possible 2FA/CAPTCHA confirmation from the project owner.
+## Границы
 
-Do not create throwaway fake accounts for this project. It is better to publish
-slowly under one consistent author identity.
+Материалы можно подготовить заранее, но регистрацию, почту, пароль, CAPTCHA,
+2FA и финальную публикацию подтверждает владелец проекта.
+
+Фейковые аккаунты не использовать. Лучше один понятный авторский профиль, чем
+несколько одноразовых личностей.

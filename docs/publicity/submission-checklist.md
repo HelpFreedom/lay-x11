@@ -1,64 +1,52 @@
-# Submission checklist
+# Чек-лист публикации
 
-## Before publishing
+## Перед публикацией
 
-- Record a short demo GIF/video:
-  - `ghbdtn` + double Shift -> `привет`;
-  - `good ntrcn` + double Shift -> `good текст`;
-  - `перпаратов` + Space -> `препаратов`.
-- Add the demo to the GitHub README.
-- Check that the latest GitHub release is visible.
-- Check that `install.sh` still works on a clean-ish GNOME Wayland machine or VM.
-- Confirm the article does not contain private examples from real work.
+- Проверить, что GitHub README открывается нормально и показывает `demo.gif`.
+- Проверить, что последний GitHub Release виден публично.
+- Проверить, что `install.sh` описан как основной способ установки полного
+  продукта, а ZIP — только как extension-only вариант.
+- Проверить, что статья не содержит приватные рабочие примеры.
+- Проверить, что первый запуск идёт только по русским площадкам.
 
-## Habr
+## Хабр
 
-- Account/nick: `radislabus-star`.
-- Article: `habr-article-ru.md`.
-- Suggested hubs:
+- Аккаунт/ник: `radislabus-star`.
+- Статья: `habr-article-ru.md`.
+- Поля формы: `habr-form-ru.md`.
+- Обложка: `cover.png`.
+- Хабы:
   - Linux;
   - Open source;
   - Rust;
   - GNOME;
   - Productivity.
-- Put the GitHub link near the end, not in the first paragraph.
-- Tone: engineering story, not product landing page.
+- GitHub-ссылку держать ближе к концу, не в первом абзаце.
+- Тон: “делал для себя, делюсь с миром”, не продуктовая реклама.
 
-## Tproger
+## Русские короткие анонсы
 
-- Use the same Russian article, shortened by roughly 25%.
-- Lead with the problem and the Wayland constraint.
-- Mention that editors can adapt the material.
+- Источник текста: `short-posts.md`.
+- Площадки:
+  - личный Telegram/канал;
+  - русские Linux/GNOME чаты;
+  - OpenNET, если новость проходит по формату;
+  - Linux.org.ru, если формат/аккаунт позволяют.
+- Не вставлять всю статью в чат.
+- Просить короткие воспроизводимые баги, а не просто звёзды.
 
-## DEV.to
+## Русские техмедиа
 
-- Use `devto-article-en.md`.
-- Suggested tags:
-  - `linux`;
-  - `opensource`;
-  - `rust`;
-  - `gnome`.
+- Первый контакт: `tproger-pitch-ru.md`.
+- Если редактор попросит материал, сократить Хабр-статью примерно на 25-30%.
+- Вести как инженерскую историю, а не как пресс-релиз.
 
-## Reddit
+## Не сейчас
 
-- Do not post the same text everywhere.
-- Always disclose authorship.
-- Prefer technical story + demo over "please star my repo".
-- Best first subreddits:
-  - `r/gnome`;
-  - `r/linux`;
-  - `r/rust`;
-  - `r/opensource`.
+- DEV.to.
+- Reddit.
+- Английская адаптация.
+- Постинг от фейковых личностей.
 
-## Account registration boundaries
-
-Registration usually needs:
-
-- email access;
-- password manager;
-- possible CAPTCHA;
-- possible 2FA;
-- acceptance of platform terms.
-
-Publication material can be prepared in advance, but the project owner should
-confirm identity, email, and final publication.
+Если английская версия понадобится позже, писать её отдельно под англоязычную
+аудиторию, а не переводить русскую статью механически.
