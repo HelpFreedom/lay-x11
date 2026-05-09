@@ -21,6 +21,7 @@
 //!   lay-test-input good_text_enter — печатает "пщщв ntrcn" + двойной Shift + Enter
 //!   lay-test-input wifi_ye_enter — печатает "wi-fi ye" + двойной Shift + Enter
 //!   lay-test-input auto_switch_words_enter — печатает "njkmrj yt hf,jnftn" через пробелы + Enter
+//!   lay-test-input preparatov_typo_enter — печатает "перпаратов" + Space + Enter
 //!   lay-test-input vyvodim_dva_enter — печатает "dsdjlbv ldf" + двойной Shift + Enter
 //!   lay-test-input mixed_coke_enter — печатает "слово кjrf-rjke" + двойной Shift + Enter
 //!   lay-test-input mixed_coke_toggle3_enter — печатает "слово кjrf-rjke" + двойной Shift × 3 + Enter
@@ -484,6 +485,30 @@ fn main() -> std::io::Result<()> {
             sleep(Duration::from_millis(650));
             tap(&mut dev, KeyCode::KEY_ENTER.code())?;
             eprintln!("[test] сценарий auto_switch_words_enter отправлен");
+        }
+        "preparatov_typo_enter" => {
+            activate_layout("ru");
+            sleep(Duration::from_millis(250));
+            tap_keys(
+                &mut dev,
+                &[
+                    KeyCode::KEY_G,
+                    KeyCode::KEY_T,
+                    KeyCode::KEY_H,
+                    KeyCode::KEY_G,
+                    KeyCode::KEY_F,
+                    KeyCode::KEY_H,
+                    KeyCode::KEY_F,
+                    KeyCode::KEY_N,
+                    KeyCode::KEY_J,
+                    KeyCode::KEY_D,
+                    KeyCode::KEY_SPACE,
+                ],
+                35,
+            )?;
+            sleep(Duration::from_millis(650));
+            tap(&mut dev, KeyCode::KEY_ENTER.code())?;
+            eprintln!("[test] сценарий preparatov_typo_enter отправлен");
         }
         "vyvodim_dva_enter" => {
             activate_layout("us");

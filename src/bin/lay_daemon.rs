@@ -2964,8 +2964,9 @@ fn correct_moved_prefix_letter_pair(text: &str) -> Option<String> {
     if left_candidate.chars().count() < 5 || right_rest.chars().count() < 5 {
         return None;
     }
-    let dict = russian_dictionary();
-    if !dict.contains(&left_candidate_lower) || !dict.contains(&right_rest_lower) {
+    if !is_known_russian_word_or_form(&left_candidate_lower)
+        || !is_known_russian_word_or_form(&right_rest_lower)
+    {
         return None;
     }
     if lay::ngram::ru_candidate_margin(&right_rest_lower, &right_lower)
@@ -3030,7 +3031,6 @@ fn correct_adjacent_transposition(word: &str) -> Option<String> {
     }
 
     let lower = word.to_lowercase();
-    let dict = russian_dictionary();
     if is_known_russian_word_or_form(&lower) {
         return None;
     }
@@ -3045,7 +3045,7 @@ fn correct_adjacent_transposition(word: &str) -> Option<String> {
         let mut candidate = chars.clone();
         candidate.swap(idx, idx + 1);
         let candidate: String = candidate.into_iter().collect();
-        if !dict.contains(&candidate) {
+        if !is_known_russian_word_or_form(&candidate) {
             continue;
         }
         if !ngram_allows_ru_candidate(&candidate, &lower, NGRAM_TYPO_REJECT_MARGIN) {
@@ -3067,7 +3067,6 @@ fn correct_repeated_letter(word: &str) -> Option<String> {
     }
 
     let lower = word.to_lowercase();
-    let dict = russian_dictionary();
     if is_known_russian_word_or_form(&lower) {
         return None;
     }
@@ -3088,7 +3087,7 @@ fn correct_repeated_letter(word: &str) -> Option<String> {
                 candidate.extend(std::iter::repeat(chars[idx]).take(keep));
                 candidate.extend_from_slice(&chars[end..]);
                 let candidate: String = candidate.into_iter().collect();
-                if !dict.contains(&candidate) {
+                if !is_known_russian_word_or_form(&candidate) {
                     continue;
                 }
                 if !ngram_allows_ru_candidate(&candidate, &lower, NGRAM_TYPO_REJECT_MARGIN) {
@@ -3113,7 +3112,6 @@ fn correct_single_letter_substitution(word: &str) -> Option<String> {
     }
 
     let lower = word.to_lowercase();
-    let dict = russian_dictionary();
     if is_known_russian_word_or_form(&lower) {
         return None;
     }
@@ -3132,7 +3130,7 @@ fn correct_single_letter_substitution(word: &str) -> Option<String> {
             let mut candidate = chars.clone();
             candidate[idx] = replacement;
             let candidate: String = candidate.into_iter().collect();
-            if !dict.contains(&candidate) {
+            if !is_known_russian_word_or_form(&candidate) {
                 continue;
             }
             if !ngram_allows_ru_candidate(&candidate, &lower, NGRAM_TYPO_REJECT_MARGIN) {
@@ -3407,7 +3405,28 @@ fn is_known_short_accusative_a_form(word: &str, dict: &HashSet<String>) -> bool 
 }
 
 fn is_known_russian_word_or_form(word: &str) -> bool {
-    russian_dictionary().contains(word) || russian_generated_form_dictionary().contains(word)
+    russian_dictionary().contains(word)
+        || russian_generated_form_dictionary().contains(word)
+        || is_known_russian_suffix_form(word)
+}
+
+fn is_known_russian_suffix_form(word: &str) -> bool {
+    if word.chars().count() < 5 {
+        return false;
+    }
+
+    const SUFFIXES: &[&str] = &[
+        "ыми", "ими", "ами", "ями", "ого", "его", "ому", "ему", "ов", "ев", "ей", "ах", "ях", "ам",
+        "ям", "ом", "ем", "ой", "ый", "ий", "ая", "яя", "ое", "ее", "ые", "ие", "а", "я", "у", "ю",
+        "е", "ы", "и",
+    ];
+
+    SUFFIXES.iter().any(|suffix| {
+        let Some(stem) = word.strip_suffix(suffix) else {
+            return false;
+        };
+        stem.chars().count() >= 3 && russian_dictionary().contains(stem)
+    })
 }
 
 fn mixed_visual_latin_word_target_layout(word: &[KeyEvent]) -> Option<bool> {
@@ -4586,22 +4605,28 @@ mod tests {
                 return None;
             }
 
-            let mut suffix_start = core.len();
-            let mut non_ws_seen = 0;
-            for (segment, is_ws) in segments.iter().rev() {
-                suffix_start -= segment.len();
-                if !is_ws {
-                    non_ws_seen += 1;
-                    if non_ws_seen == 2 {
-                        break;
+            for word_count in [2, 1] {
+                let mut suffix_start = core.len();
+                let mut non_ws_seen = 0;
+                for (segment, is_ws) in segments.iter().rev() {
+                    suffix_start -= segment.len();
+                    if !is_ws {
+                        non_ws_seen += 1;
+                        if non_ws_seen == word_count {
+                            break;
+                        }
                     }
+                }
+
+                let prefix = &core[..suffix_start];
+                let suffix = &core[suffix_start..];
+                if let Some(replacement) = apply_typing_assist_exact(&format!("{suffix}{trailing}"))
+                {
+                    return Some(format!("{leading}{prefix}{replacement}"));
                 }
             }
 
-            let prefix = &core[..suffix_start];
-            let suffix = &core[suffix_start..];
-            let replacement = apply_typing_assist_exact(&format!("{suffix}{trailing}"))?;
-            Some(format!("{leading}{prefix}{replacement}"))
+            None
         })
     }
 
@@ -6239,6 +6264,11 @@ mod tests {
     }
 
     #[test]
+    fn russian_suffix_forms_are_known_candidates() {
+        assert!(is_known_russian_word_or_form("препаратов"));
+    }
+
+    #[test]
     fn typing_assist_auto_switch_converts_confident_wrong_layout_words() {
         assert_eq!(
             apply_typing_assist("njkmrj ", true),
@@ -6275,6 +6305,14 @@ mod tests {
         assert_eq!(
             apply_typing_assist_exact("Проверак "),
             Some("Проверка ".to_string())
+        );
+        assert_eq!(
+            apply_typing_assist_exact("перпаратов "),
+            Some("препаратов ".to_string())
+        );
+        assert_eq!(
+            apply_typing_assist_to_text_tail("сделай понятную таблицу конкретных перпаратов "),
+            Some("сделай понятную таблицу конкретных препаратов ".to_string())
         );
     }
 
