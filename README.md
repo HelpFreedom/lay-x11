@@ -192,9 +192,14 @@ extension/lay@radislabus-star.github.io/
 
 ```json
 {
-  "typing_assist": true
+  "typing_assist": true,
+  "auto_switch_layout": true
 }
 ```
+
+`auto_switch_layout` управляет только автоматическими правками после пробела:
+если опция включена, активная раскладка остаётся той, которая соответствует
+исправленному тексту. Ручной double Shift переключает раскладку всегда.
 
 ### Автоподмена
 

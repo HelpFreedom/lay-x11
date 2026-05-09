@@ -79,6 +79,8 @@ struct LayConfig {
     auto_replace: bool,
     /// Безопасная помощь при наборе после пробела: только точные правила.
     typing_assist: bool,
+    /// После автоматической помощи при наборе оставлять активной раскладку результата.
+    auto_switch_layout: bool,
     /// Локальный opt-in лог исправлений для будущего обучения.
     learning_log: bool,
 }
@@ -95,6 +97,7 @@ impl Default for LayConfig {
             replace_words: 1,
             auto_replace: false,
             typing_assist: false,
+            auto_switch_layout: true,
             learning_log: false,
         }
     }
@@ -142,6 +145,10 @@ fn active_auto_replace() -> bool {
 
 fn active_typing_assist() -> bool {
     LayConfig::load().typing_assist
+}
+
+fn active_auto_switch_layout() -> bool {
+    LayConfig::load().auto_switch_layout
 }
 
 fn active_learning_log() -> bool {
@@ -311,11 +318,12 @@ fn listen_keyboard(
         device.name().unwrap_or("?")
     ));
     log(&format!(
-        "► config: mode={} replace_words={} auto_replace={} typing_assist={} trigger={} tap={}ms window={}ms debounce={}ms",
+        "► config: mode={} replace_words={} auto_replace={} typing_assist={} auto_switch_layout={} trigger={} tap={}ms window={}ms debounce={}ms",
         cfg.mode,
         cfg.replace_words,
         cfg.auto_replace,
         cfg.typing_assist,
+        cfg.auto_switch_layout,
         cfg.trigger,
         cfg.tap_max_ms,
         cfg.shift_window_ms,
@@ -1310,6 +1318,7 @@ fn handle_typing_assist_after_space(
         log(&format!("⚠ typing-assist modifier cleanup failed: {e}"));
     }
 
+    let original_layout = read_current_layout_is_ru().ok();
     let plan = plan_text_replacement(&original, &replacement).unwrap_or_else(|| TextReplacement {
         move_left: 0,
         backspaces: original.chars().count() as u32,
@@ -1335,6 +1344,18 @@ fn handle_typing_assist_after_space(
     }
     if let Err(e) = emit_key_taps_fast(kbd, KeyCode::KEY_RIGHT, plan.move_right) {
         log(&format!("⚠ typing-assist cursor restore failed: {e}"));
+    }
+    let target_layout = preferred_layout_for_text(&replacement, replacement_layout_is_ru);
+    if active_auto_switch_layout() {
+        match switch_to_target_layout(target_layout) {
+            Ok(layout_id) => log(&format!("  typing-assist layout → {layout_id}")),
+            Err(e) => log(&format!("⚠ typing-assist layout switch failed: {e}")),
+        }
+    } else if let Some(layout_is_ru) = original_layout {
+        match switch_to_target_layout(layout_is_ru) {
+            Ok(layout_id) => log(&format!("  typing-assist layout restored → {layout_id}")),
+            Err(e) => log(&format!("⚠ typing-assist layout restore failed: {e}")),
+        }
     }
 
     let words = original.split_whitespace().count();
@@ -4545,6 +4566,11 @@ mod tests {
         assert_eq!(smart.active_replace_words(), 2);
         assert_eq!(simple.active_correction_engine(), CorrectionEngine::Replay);
         assert_eq!(smart.active_correction_engine(), CorrectionEngine::Smart);
+    }
+
+    #[test]
+    fn auto_switch_layout_is_enabled_by_default() {
+        assert!(LayConfig::default().auto_switch_layout);
     }
 
     #[test]

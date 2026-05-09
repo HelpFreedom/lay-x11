@@ -18,9 +18,9 @@ import {getInputSourceManager} from 'resource:///org/gnome/shell/ui/status/keybo
 
 const CONFIG_PATH = GLib.get_home_dir() + '/.config/lay/config.json';
 const STATS_PATH = GLib.get_home_dir() + '/.local/share/lay/stats.json';
-const APP_VERSION = '0.1.119';
+const APP_VERSION = '0.1.120';
 const APP_DESCRIPTION = 'Double Shift layout rescue for Linux/GNOME Wayland';
-const APP_RELEASE_DATE = '2026-05-08';
+const APP_RELEASE_DATE = '2026-05-09';
 const APP_LICENSE = 'MIT';
 const APP_URL = 'https://github.com/radislabus-star/lay-public';
 const APP_PLATFORM = 'GNOME Wayland';
@@ -33,6 +33,8 @@ const LEARNING_LOG_TOOLTIP = 'Запоминать правки работает
     + '• после auto/smart lay ждёт до 30 секунд,\n'
     + '  удалишь ли ты результат и введёшь свой вариант.\n'
     + 'Если удалил и перепечатал — это считается твоей правкой.';
+const AUTO_SWITCH_TOOLTIP = 'После автоматической помощи при наборе lay оставляет активной\n'
+    + 'раскладку исправленного текста. Double Shift переключает раскладку всегда.';
 const DEFAULTS = {
     mode: 'simple',
     correction_engine: 'replay',
@@ -43,6 +45,7 @@ const DEFAULTS = {
     replace_words: 1,
     auto_replace: false,
     typing_assist: false,
+    auto_switch_layout: true,
     learning_log: false,
 };
 
@@ -229,6 +232,12 @@ class LayIndicator extends PanelMenu.Button {
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         this.menu.addMenuItem(this._switchItem('Помощь при наборе', 'typing_assist', true));
+        this.menu.addMenuItem(this._switchItem(
+            'Автопереключение',
+            'auto_switch_layout',
+            false,
+            AUTO_SWITCH_TOOLTIP
+        ));
         this.menu.addMenuItem(this._switchItem('Автоподмена', 'auto_replace', true));
         this.menu.addMenuItem(this._switchItem(
             'Запоминать правки',
@@ -627,7 +636,8 @@ class LayIndicator extends PanelMenu.Button {
     }
 
     _aboutConfigText() {
-        return `${this._engineLabel()} · ${this._cfg.replace_words} сл. · ${this._triggerLabel(this._cfg.trigger)}`;
+        const autoSwitch = this._cfg.auto_switch_layout ? 'авто-layout' : 'layout вручную';
+        return `${this._engineLabel()} · ${this._cfg.replace_words} сл. · ${autoSwitch} · ${this._triggerLabel(this._cfg.trigger)}`;
     }
 
     _aboutStatsText() {
