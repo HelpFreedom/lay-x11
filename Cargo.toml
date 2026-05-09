@@ -1,6 +1,6 @@
 [package]
 name = "lay"
-version = "0.1.121"
+version = "0.1.122"
 edition = "2021"
 description = "Double Shift layout rescue for Linux/GNOME Wayland"
 license = "MIT"

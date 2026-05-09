@@ -58,6 +58,9 @@
 
 ### Установка
 
+Обычная установка ставит всё сразу: Rust-бинарники, user systemd-сервис
+`lay-daemon` и GNOME Shell extension.
+
 ```bash
 git clone https://github.com/radislabus-star/lay-public.git ~/projects/lay
 cd ~/projects/lay
@@ -68,6 +71,31 @@ bash install.sh
 группа `input` и расширение GNOME.
 
 Потом набери слово не в той раскладке и нажми **Shift два раза**.
+
+### Extension ZIP
+
+Для ручной установки GNOME-расширения или отправки на extensions.gnome.org можно
+собрать ZIP:
+
+```bash
+bash scripts/package-extension.sh
+```
+
+Архив появится в:
+
+```text
+dist/gnome-extension/lay@radislabus-star.github.io-<version>.zip
+```
+
+Установить только расширение можно так:
+
+```bash
+gnome-extensions install --force dist/gnome-extension/lay@radislabus-star.github.io-<version>.zip
+gnome-extensions enable lay@radislabus-star.github.io
+```
+
+Но для полной работы double Shift всё равно нужен `lay-daemon`, поэтому для
+обычных пользователей предпочтителен `bash install.sh`.
 
 ### Требования
 
@@ -299,7 +327,7 @@ bash install.sh
 
 ### Roadmap
 
-- Более аккуратный public installer и uninstall-команда.
+- Uninstall-команда и более дружелюбный release-пакет.
 - Короткий demo GIF/video для double Shift.
 - Больше регрессионных тестов из реальных принятых/отклонённых исправлений.
 - Ещё более понятные privacy-настройки.
@@ -333,6 +361,18 @@ bash install.sh
 
 After installation, log out and log back in so the `input` group and GNOME
 extension are picked up.
+
+Extension ZIP for manual install or extensions.gnome.org upload:
+
+```bash
+bash scripts/package-extension.sh
+gnome-extensions install --force dist/gnome-extension/lay@radislabus-star.github.io-<version>.zip
+gnome-extensions enable lay@radislabus-star.github.io
+```
+
+The extension alone is only the GNOME Shell bridge and tray UI. The full
+double-Shift workflow also needs `lay-daemon`, so normal users should use
+`bash install.sh`.
 
 Supported/tested target:
 
