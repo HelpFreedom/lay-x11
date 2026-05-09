@@ -41,6 +41,7 @@ CASES = {
     "mixed_coke_enter": Case("mixed_coke_enter", "слово кока-колу"),
     "mixed_coke_toggle3_enter": Case("mixed_coke_toggle3_enter", "слово кока-колу"),
     "n_teper_mixed_enter": Case("n_teper_mixed_enter", "Теперь"),
+    "auto_switch_words_enter": Case("auto_switch_words_enter", "только не работает"),
     "proverka_ntrcn_enter": Case("proverka_ntrcn_enter", "проверка текст"),
     "vyvodim_dva_enter": Case("vyvodim_dva_enter", "выводим два"),
     "wifi_ye_enter": Case("wifi_ye_enter", "wi-fi ну"),

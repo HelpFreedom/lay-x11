@@ -1299,7 +1299,7 @@ fn handle_typing_assist_after_space(
     let correction = [2, 1].into_iter().find_map(|word_count| {
         let events = buf.last_completed_words_events(word_count)?;
         let original = map_original_events(&events);
-        let replacement = apply_typing_assist_exact(&original)?;
+        let replacement = apply_typing_assist(&original, active_auto_switch_layout())?;
         Some((original, replacement))
     });
     let Some((original, replacement)) = correction else {
@@ -2606,7 +2606,12 @@ fn apply_auto_replace(original: &str, target: &str) -> Option<String> {
     })
 }
 
+#[cfg(test)]
 fn apply_typing_assist_exact(text: &str) -> Option<String> {
+    apply_typing_assist(text, false)
+}
+
+fn apply_typing_assist(text: &str, allow_layout_auto: bool) -> Option<String> {
     let (leading, core, trailing) = split_edge_whitespace(text);
     if core.is_empty() {
         return None;
@@ -2623,6 +2628,11 @@ fn apply_typing_assist_exact(text: &str) -> Option<String> {
             replacement_for_token(word)
                 .or_else(|| correct_duplicate_layout_prefix_on_ascii_token(word))
                 .or_else(|| correct_wrong_layout_ascii_technical_token(word))
+                .or_else(|| {
+                    allow_layout_auto
+                        .then(|| correct_wrong_layout_ascii_word(word))
+                        .flatten()
+                })
                 .or_else(|| correct_cyrillic_word_case(word))
                 .or_else(|| correct_hard_sign_typo(word))
                 .or_else(|| correct_adjacent_transposition(word))
@@ -2637,6 +2647,79 @@ fn apply_typing_assist_exact(text: &str) -> Option<String> {
     out.push_str(&replacement);
     out.push_str(trailing);
     (out != text).then_some(out)
+}
+
+fn correct_wrong_layout_ascii_word(token: &str) -> Option<String> {
+    if !is_plain_ascii_layout_token(token) || is_protected_ascii_layout_token(token) {
+        return None;
+    }
+
+    let converted = lay::dict::convert(token, lay::dict::Direction::Us2Ru);
+    if converted == token || !is_cyrillic_word(&converted) {
+        return None;
+    }
+
+    let converted_lower = converted.to_lowercase();
+    if !is_known_russian_layout_autoswitch_word(&converted_lower) {
+        return None;
+    }
+
+    match lay::llm::choose_token_hybrid(token, &converted) {
+        Ok(Some(choice)) if choice == converted => Some(converted),
+        Ok(Some(choice)) if choice == token => allow_short_layout_word(token, &converted_lower)
+            .then(|| apply_word_case(token, &converted_lower)),
+        _ => Some(apply_word_case(token, &converted_lower)),
+    }
+}
+
+fn is_plain_ascii_layout_token(token: &str) -> bool {
+    token.is_ascii()
+        && token.chars().any(|ch| ch.is_ascii_alphabetic())
+        && !token.chars().any(|ch| ch.is_ascii_digit())
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_alphabetic() || matches!(ch, ',' | ';' | '\'' | '[' | ']' | '`'))
+}
+
+fn is_protected_ascii_layout_token(token: &str) -> bool {
+    token.chars().any(|ch| ch.is_ascii_alphabetic())
+        && (is_upper_ascii_layout_acronym(token) || is_mixed_case_ascii_layout_brand(token))
+}
+
+fn is_upper_ascii_layout_acronym(token: &str) -> bool {
+    let letters: Vec<char> = token
+        .chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .collect();
+    (2..=4).contains(&letters.len()) && letters.iter().all(|ch| ch.is_ascii_uppercase())
+}
+
+fn is_mixed_case_ascii_layout_brand(token: &str) -> bool {
+    let letters: Vec<char> = token
+        .chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .collect();
+    letters.len() >= 4
+        && letters.iter().any(|ch| ch.is_ascii_lowercase())
+        && letters.iter().skip(1).any(|ch| ch.is_ascii_uppercase())
+}
+
+fn allow_short_layout_word(original: &str, converted_lower: &str) -> bool {
+    original
+        .chars()
+        .filter(|ch| ch.is_ascii_alphabetic())
+        .count()
+        <= 3
+        && russian_tiny_dictionary().contains(converted_lower)
+}
+
+fn is_known_russian_layout_autoswitch_word(word: &str) -> bool {
+    let len = word.chars().filter(|ch| is_cyrillic_letter(*ch)).count();
+    if len <= 3 {
+        return russian_tiny_dictionary().contains(word);
+    }
+
+    is_known_russian_word_or_form(word) || russian_short_dictionary().contains(word)
 }
 
 fn replacement_for_token(token: &str) -> Option<String> {
@@ -3681,6 +3764,28 @@ fn russian_short_dictionary() -> &'static HashSet<String> {
             let mut words = words;
             words.extend(test_russian_forms().into_iter().map(str::to_string));
             words.insert("пара".to_string());
+            words
+        }
+        #[cfg(not(test))]
+        {
+            words
+        }
+    })
+}
+
+fn russian_tiny_dictionary() -> &'static HashSet<String> {
+    static WORDS: OnceLock<HashSet<String>> = OnceLock::new();
+    WORDS.get_or_init(|| {
+        let words =
+            load_hunspell_words_min_len("/usr/share/hunspell/ru_RU.dic", 2).unwrap_or_else(|e| {
+                log(&format!("⚠ tiny ru dictionary load failed: {e}"));
+                HashSet::new()
+            });
+        #[cfg(test)]
+        {
+            let mut words = words;
+            words.extend(test_russian_forms().into_iter().map(str::to_string));
+            words.insert("не".to_string());
             words
         }
         #[cfg(not(test))]
@@ -6131,6 +6236,34 @@ mod tests {
         );
         assert_eq!(apply_typing_assist_exact("нормально "), None);
         assert_eq!(apply_typing_assist_exact("Есть "), None);
+    }
+
+    #[test]
+    fn typing_assist_auto_switch_converts_confident_wrong_layout_words() {
+        assert_eq!(
+            apply_typing_assist("njkmrj ", true),
+            Some("только ".to_string())
+        );
+        assert_eq!(apply_typing_assist("yt ", true), Some("не ".to_string()));
+        assert_eq!(
+            apply_typing_assist("hf,jnftn ", true),
+            Some("работает ".to_string())
+        );
+        assert_eq!(
+            apply_typing_assist("njkmrj ", false),
+            None,
+            "auto layout word repair must stay behind the tray checkbox"
+        );
+    }
+
+    #[test]
+    fn typing_assist_auto_switch_keeps_english_and_protected_ascii() {
+        assert_eq!(apply_typing_assist("hello ", true), None);
+        assert_eq!(apply_typing_assist("test ", true), None);
+        assert_eq!(apply_typing_assist("good ", true), None);
+        assert_eq!(apply_typing_assist("API ", true), None);
+        assert_eq!(apply_typing_assist("AmoCRM ", true), None);
+        assert_eq!(apply_typing_assist("wi-fi ", true), None);
     }
 
     #[test]

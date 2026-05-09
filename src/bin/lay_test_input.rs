@@ -20,6 +20,7 @@
 //!   lay-test-input good_vshgidu_enter — печатает "good Вщгиду" + двойной Shift + Enter
 //!   lay-test-input good_text_enter — печатает "пщщв ntrcn" + двойной Shift + Enter
 //!   lay-test-input wifi_ye_enter — печатает "wi-fi ye" + двойной Shift + Enter
+//!   lay-test-input auto_switch_words_enter — печатает "njkmrj yt hf,jnftn" через пробелы + Enter
 //!   lay-test-input vyvodim_dva_enter — печатает "dsdjlbv ldf" + двойной Shift + Enter
 //!   lay-test-input mixed_coke_enter — печатает "слово кjrf-rjke" + двойной Shift + Enter
 //!   lay-test-input mixed_coke_toggle3_enter — печатает "слово кjrf-rjke" + двойной Shift × 3 + Enter
@@ -71,6 +72,7 @@ fn main() -> std::io::Result<()> {
         KeyCode::KEY_ENTER,
         KeyCode::KEY_MINUS,
         KeyCode::KEY_EQUAL,
+        KeyCode::KEY_COMMA,
     ];
     for k in all {
         keys.insert(k);
@@ -440,6 +442,48 @@ fn main() -> std::io::Result<()> {
             )?;
             double_shift_enter(&mut dev, 900)?;
             eprintln!("[test] сценарий wifi_ye_enter отправлен");
+        }
+        "auto_switch_words_enter" => {
+            activate_layout("us");
+            sleep(Duration::from_millis(250));
+            tap_keys(
+                &mut dev,
+                &[
+                    KeyCode::KEY_N,
+                    KeyCode::KEY_J,
+                    KeyCode::KEY_K,
+                    KeyCode::KEY_M,
+                    KeyCode::KEY_R,
+                    KeyCode::KEY_J,
+                    KeyCode::KEY_SPACE,
+                ],
+                35,
+            )?;
+            sleep(Duration::from_millis(450));
+            tap_keys(
+                &mut dev,
+                &[KeyCode::KEY_Y, KeyCode::KEY_T, KeyCode::KEY_SPACE],
+                35,
+            )?;
+            sleep(Duration::from_millis(450));
+            tap_keys(
+                &mut dev,
+                &[
+                    KeyCode::KEY_H,
+                    KeyCode::KEY_F,
+                    KeyCode::KEY_COMMA,
+                    KeyCode::KEY_J,
+                    KeyCode::KEY_N,
+                    KeyCode::KEY_F,
+                    KeyCode::KEY_T,
+                    KeyCode::KEY_N,
+                    KeyCode::KEY_SPACE,
+                ],
+                35,
+            )?;
+            sleep(Duration::from_millis(650));
+            tap(&mut dev, KeyCode::KEY_ENTER.code())?;
+            eprintln!("[test] сценарий auto_switch_words_enter отправлен");
         }
         "vyvodim_dva_enter" => {
             activate_layout("us");
