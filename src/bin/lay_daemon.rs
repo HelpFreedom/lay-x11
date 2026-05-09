@@ -41,10 +41,14 @@ const MODIFIER_RELEASE_ROUNDS: usize = 2;
 const MODIFIER_RELEASE_PACE_MS: u64 = 3;
 const LAYOUT_POLL_INTERVAL_MS: u64 = 250;
 const NGRAM_TYPO_REJECT_MARGIN: f64 = 0.25;
+const NGRAM_TRANSPOSE_MARGIN: f64 = -8.0;
 const NGRAM_SPLIT_REJECT_MARGIN: f64 = 0.25;
 const NGRAM_NODICT_SPLIT_REJECT_MARGIN: f64 = 1.0;
 const NGRAM_DICT_MISSING_LETTER_MARGIN: f64 = -8.0;
 const NGRAM_MISSING_LETTER_MARGIN: f64 = 1.5;
+const NGRAM_EXTRA_LETTER_MARGIN: f64 = 0.75;
+const NGRAM_VOWEL_CONFUSION_MARGIN: f64 = -1.0;
+const NGRAM_VERB_ENDING_MARGIN: f64 = -8.0;
 const NGRAM_HARD_SIGN_MARGIN: f64 = 1.0;
 const NGRAM_MOVED_PREFIX_MARGIN: f64 = 0.5;
 const NGRAM_MOVED_PREFIX_RIGHT_MARGIN: f64 = 5.0;
@@ -2638,6 +2642,9 @@ fn apply_typing_assist(text: &str, allow_layout_auto: bool) -> Option<String> {
                 .or_else(|| correct_adjacent_transposition(word))
                 .or_else(|| correct_repeated_letter(word))
                 .or_else(|| correct_single_letter_substitution(word))
+                .or_else(|| correct_verb_ending_confusion(word))
+                .or_else(|| correct_vowel_confusion(word))
+                .or_else(|| correct_extra_letters(word))
                 .or_else(|| correct_missing_letter(word))
                 .map(|replacement| format!("{token_leading}{replacement}{token_trailing}"))
         })?;
@@ -3048,7 +3055,7 @@ fn correct_adjacent_transposition(word: &str) -> Option<String> {
         if !is_known_russian_word_or_form(&candidate) {
             continue;
         }
-        if !ngram_allows_ru_candidate(&candidate, &lower, NGRAM_TYPO_REJECT_MARGIN) {
+        if !ngram_allows_ru_candidate(&candidate, &lower, NGRAM_TRANSPOSE_MARGIN) {
             continue;
         }
 
@@ -3145,6 +3152,70 @@ fn correct_single_letter_substitution(word: &str) -> Option<String> {
     }
 
     found.map(|candidate| apply_word_case(word, &candidate))
+}
+
+fn correct_extra_letters(word: &str) -> Option<String> {
+    if word.chars().count() < 6 || !is_cyrillic_word(word) {
+        return None;
+    }
+
+    let lower = word.to_lowercase();
+    if is_known_russian_word_or_form(&lower) {
+        return None;
+    }
+
+    best_unique_known_ngram_candidate(
+        word,
+        generate_extra_letter_candidates(&lower),
+        NGRAM_EXTRA_LETTER_MARGIN,
+    )
+}
+
+fn correct_vowel_confusion(word: &str) -> Option<String> {
+    if word.chars().count() < 5 || !is_cyrillic_word(word) {
+        return None;
+    }
+
+    let lower = word.to_lowercase();
+    if is_known_russian_word_or_form(&lower) {
+        return None;
+    }
+
+    best_unique_known_ngram_candidate(
+        word,
+        generate_vowel_confusion_candidates(&lower),
+        NGRAM_VOWEL_CONFUSION_MARGIN,
+    )
+}
+
+fn correct_verb_ending_confusion(word: &str) -> Option<String> {
+    if word.chars().count() < 5 || !is_cyrillic_word(word) {
+        return None;
+    }
+
+    let lower = word.to_lowercase();
+    if is_known_russian_word_or_form(&lower) {
+        return None;
+    }
+
+    for (from, to) in [("ешь", "ишь"), ("ет", "ит")] {
+        let Some(stem) = lower.strip_suffix(from) else {
+            continue;
+        };
+        if stem.chars().count() < 3 {
+            continue;
+        }
+        let candidate = format!("{stem}{to}");
+        if !is_known_russian_word_or_form(&candidate) {
+            continue;
+        }
+        if !ngram_allows_ru_candidate(&candidate, &lower, NGRAM_VERB_ENDING_MARGIN) {
+            continue;
+        }
+        return Some(apply_word_case(word, &candidate));
+    }
+
+    None
 }
 
 fn correct_missing_letter(word: &str) -> Option<String> {
@@ -3408,6 +3479,7 @@ fn is_known_russian_word_or_form(word: &str) -> bool {
     russian_dictionary().contains(word)
         || russian_generated_form_dictionary().contains(word)
         || is_known_russian_suffix_form(word)
+        || is_known_russian_verb_form(word)
 }
 
 fn is_known_russian_suffix_form(word: &str) -> bool {
@@ -3426,6 +3498,45 @@ fn is_known_russian_suffix_form(word: &str) -> bool {
             return false;
         };
         stem.chars().count() >= 3 && russian_dictionary().contains(stem)
+    })
+}
+
+fn is_known_russian_verb_form(word: &str) -> bool {
+    if word.chars().count() < 5 {
+        return false;
+    }
+
+    const ENDINGS: &[(&str, &[&str])] = &[
+        ("ишь", &["ить", "еть"]),
+        ("ит", &["ить", "еть"]),
+        ("ется", &["ться"]),
+        ("ются", &["ться"]),
+        ("ился", &["иться"]),
+        ("илась", &["иться"]),
+        ("ились", &["иться"]),
+        ("илось", &["иться"]),
+        ("ался", &["аться"]),
+        ("алась", &["аться"]),
+        ("ались", &["аться"]),
+        ("алось", &["аться"]),
+        ("ил", &["ить"]),
+        ("ила", &["ить"]),
+        ("или", &["ить"]),
+        ("ило", &["ить"]),
+        ("ал", &["ать"]),
+        ("ала", &["ать"]),
+        ("али", &["ать"]),
+        ("ало", &["ать"]),
+    ];
+
+    ENDINGS.iter().any(|(ending, lemmas)| {
+        let Some(stem) = word.strip_suffix(ending) else {
+            return false;
+        };
+        stem.chars().count() >= 3
+            && lemmas
+                .iter()
+                .any(|lemma_suffix| russian_dictionary().contains(&format!("{stem}{lemma_suffix}")))
     })
 }
 
@@ -3669,6 +3780,51 @@ where
     found.map(|candidate| apply_word_case(original, &candidate))
 }
 
+fn best_unique_known_ngram_candidate<I>(
+    original: &str,
+    candidates: I,
+    min_margin: f64,
+) -> Option<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let lower = original.to_lowercase();
+    let mut seen = HashSet::new();
+    let mut best: Option<(String, f64)> = None;
+    let mut second_best = f64::NEG_INFINITY;
+
+    for candidate in candidates {
+        if candidate == lower || !seen.insert(candidate.clone()) {
+            continue;
+        }
+        if !is_cyrillic_word(&candidate) || !is_known_russian_word_or_form(&candidate) {
+            continue;
+        }
+
+        let margin = lay::ngram::ru_candidate_margin(&candidate, &lower);
+        if margin < min_margin {
+            continue;
+        }
+
+        match &best {
+            Some((_, best_margin)) if margin <= *best_margin => {
+                second_best = second_best.max(margin);
+            }
+            Some((_, best_margin)) => {
+                second_best = second_best.max(*best_margin);
+                best = Some((candidate, margin));
+            }
+            None => best = Some((candidate, margin)),
+        }
+    }
+
+    let (candidate, best_margin) = best?;
+    if best_margin - second_best < 0.40 {
+        return None;
+    }
+    Some(apply_word_case(original, &candidate))
+}
+
 fn generate_missing_letter_candidates(lower: &str) -> impl Iterator<Item = String> + '_ {
     let chars: Vec<char> = lower.chars().collect();
     (0..=chars.len()).flat_map(move |idx| {
@@ -3683,6 +3839,58 @@ fn generate_missing_letter_candidates(lower: &str) -> impl Iterator<Item = Strin
             }
         })
     })
+}
+
+fn generate_extra_letter_candidates(lower: &str) -> Vec<String> {
+    let chars: Vec<char> = lower.chars().collect();
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+
+    for delete_len in [1usize, 2] {
+        if chars.len() < delete_len + 5 {
+            continue;
+        }
+        for idx in 0..=chars.len() - delete_len {
+            let mut candidate = String::with_capacity(lower.len());
+            candidate.extend(chars[..idx].iter());
+            candidate.extend(chars[idx + delete_len..].iter());
+            if seen.insert(candidate.clone()) {
+                candidates.push(candidate);
+            }
+        }
+    }
+
+    candidates
+}
+
+fn generate_vowel_confusion_candidates(lower: &str) -> Vec<String> {
+    let chars: Vec<char> = lower.chars().collect();
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+
+    for idx in 0..chars.len() {
+        for replacement in ru_vowel_confusion_replacements(chars[idx]).iter().copied() {
+            let mut candidate = chars.clone();
+            candidate[idx] = replacement;
+            let candidate: String = candidate.into_iter().collect();
+            if seen.insert(candidate.clone()) {
+                candidates.push(candidate);
+            }
+        }
+    }
+
+    candidates
+}
+
+fn ru_vowel_confusion_replacements(ch: char) -> &'static [char] {
+    match ch {
+        'а' => &['о'],
+        'о' => &['а'],
+        'е' => &['и', 'ё'],
+        'и' => &['е'],
+        'ё' => &['е'],
+        _ => &[],
+    }
 }
 
 fn generate_hard_sign_candidates(lower: &str) -> impl Iterator<Item = String> + '_ {
@@ -6266,6 +6474,10 @@ mod tests {
     #[test]
     fn russian_suffix_forms_are_known_candidates() {
         assert!(is_known_russian_word_or_form("препаратов"));
+        assert!(is_known_russian_word_or_form("кнопками"));
+        assert!(is_known_russian_word_or_form("помогу"));
+        assert!(is_known_russian_word_or_form("видишь"));
+        assert!(is_known_russian_word_or_form("значит"));
     }
 
     #[test]
@@ -6369,6 +6581,30 @@ mod tests {
         assert_eq!(
             apply_typing_assist_exact("иблиотеку "),
             Some("библиотеку ".to_string())
+        );
+    }
+
+    #[test]
+    fn typing_assist_fixes_live_user_stream_typos() {
+        assert_eq!(
+            apply_typing_assist_exact("занчит "),
+            Some("значит ".to_string())
+        );
+        assert_eq!(
+            apply_typing_assist_exact("работатет "),
+            Some("работает ".to_string())
+        );
+        assert_eq!(
+            apply_typing_assist_exact("помагу "),
+            Some("помогу ".to_string())
+        );
+        assert_eq!(
+            apply_typing_assist_exact("видешь "),
+            Some("видишь ".to_string())
+        );
+        assert_eq!(
+            apply_typing_assist_exact("кнокопками "),
+            Some("кнопками ".to_string())
         );
     }
 
@@ -6561,6 +6797,11 @@ mod tests {
             ("Плозо ", "Плохо "),
             ("фактческим ", "фактическим "),
             ("иблиотеку ", "библиотеку "),
+            ("занчит ", "значит "),
+            ("работатет ", "работает "),
+            ("помагу ", "помогу "),
+            ("видешь ", "видишь "),
+            ("кнокопками ", "кнопками "),
             ("Обьясни ", "Объясни "),
             ("исправленно ", "исправлено "),
             ("Исправленно ", "Исправлено "),
