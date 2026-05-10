@@ -26,6 +26,15 @@ LLM или буфер обмена.
 GitHub:
 https://github.com/radislabus-star/lay-public
 
+Хабр:
+https://habr.com/ru/sandbox/284260/
+
+## Published links
+
+- Хабр-песочница: https://habr.com/ru/sandbox/284260/
+- Linux.org.ru: https://www.linux.org.ru/news/opensource/18288599
+- OpenNET: отправлено на модерацию, публичная ссылка появится после проверки.
+
 ## Habr intro teaser
 
 Сделал для себя маленькую утилиту для GNOME Wayland и выкладываю в open source:
@@ -63,3 +72,6 @@ wi-fi ye   -> wi-fi ну
 
 GitHub:
 https://github.com/radislabus-star/lay-public
+
+Хабр:
+https://habr.com/ru/sandbox/284260/
