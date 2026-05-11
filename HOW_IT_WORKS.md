@@ -106,9 +106,50 @@ DOUBLE SHIFT ✓
 Любая **другая клавиша** в состояниях FirstPress/WaitingSecond → Idle (отмена).
 В состоянии SecondPress — игнорируется (второй Shift уже нажат, ждём release).
 
-### Почему GNOME Extension для переключения раскладки
+### Layout backend
 
-На Wayland нет API для переключения раскладки извне. `gsettings` меняет
+Переключение раскладки вынесено в backend-слой:
+
+```json
+"layout_backend": "auto"
+```
+
+Поддержанные значения:
+
+- `auto` — выбрать backend по окружению;
+- `gnome` — GNOME Shell extension + DBus;
+- `kde` — `qdbus/qdbus6 org.kde.keyboard /Layouts setLayout`;
+- `x11` — `xkb-switch`, `xkblayout-state` или fallback через `setxkbmap`.
+
+GNOME Wayland остаётся основной проверенной средой. KDE/X11 backend пока
+экспериментальные и добавлены как отдельный слой, чтобы ядро replay/smart/typing
+assist больше не было жёстко привязано к GNOME.
+
+### ptah_alexs — жёсткая раскладка по окну
+
+`ptah_alexs` реализован в GNOME extension, потому что именно GNOME Shell видит
+активное окно и его app id / wm class. Это не “память последней раскладки”,
+а policy-режим:
+
+```json
+{
+  "ptah_alexs_mode": true,
+  "ptah_alexs_rules": [
+    {"kind": "app_id", "value": "org.gnome.Terminal.desktop", "layout": "us", "label": "Terminal"}
+  ]
+}
+```
+
+При смене фокуса extension получает `notify::focus-window`, находит правило для
+текущего окна и вызывает `inputSources[i].activate()` для `us` или `ru`. Правило
+`layout = "keep"` означает “это окно не трогать”.
+
+Правила добавляются из трея для текущего активного окна. Заголовок окна не
+используется как ключ по умолчанию, чтобы не сохранять приватный текст из title.
+
+### Почему GNOME Extension всё ещё нужен на GNOME Wayland
+
+На Wayland нет общего API для переключения раскладки извне. `gsettings` меняет
 настройки, но не применяет их к текущей сессии ([Bug #1956916](https://gitlab.gnome.org/GNOME/gnome-shell/-/issues/1956916)).
 Виртуальная эмуляция `Alt+Shift` не регистрируется Mutter как акселератор.
 
@@ -264,11 +305,13 @@ lay/
 │   ├── dict.rs          — словарь US↔RU, detect_direction, convert
 │   ├── quality.rs       — legacy/auxiliary quality heuristics
 │   ├── ngram.rs         — char 3-gram scorer для typing assist
-│   └── llm.rs           — optional model arbiter вокруг готовых кандидатов
+│   ├── llm.rs           — optional model arbiter вокруг готовых кандидатов
+│   └── lem.rs           — lightweight scorer/ranker для готовых вариантов
 │
 ├── src/bin/
-│   ├── lay_daemon.rs        — evdev listener, FSM, uinput replay, DBus client
-│   └── lay_ngram_corpus.rs  — build/check/cache локального n-gram корпуса
+│   ├── lay_daemon.rs        — evdev listener, FSM, layout backend, uinput replay
+│   ├── lay_ngram_corpus.rs  — build/check/cache локального n-gram корпуса
+│   └── lay_lem_research.rs  — локальный stress-test LEM scorer
 │
 └── extension/
     └── lay@radislabus-star.github.io/

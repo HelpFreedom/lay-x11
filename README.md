@@ -2,9 +2,9 @@
 
 # lay
 
-**Спасатель неправильной RU/EN раскладки для Linux/GNOME Wayland**
+**Спасатель неправильной RU/EN раскладки для Linux**
 
-**Double Shift layout rescue for Linux/GNOME Wayland**
+**Double Shift RU/EN layout rescue for Linux desktops**
 
 Напечатал слово не в той раскладке? Нажми **Shift два раза** и продолжай писать.
 
@@ -52,17 +52,20 @@ GNOME Wayland окружении, третьи решали задачу не т
 предсказуемое: ошибся раскладкой, нажал двойной Shift, последнее слово
 перепечаталось в другой раскладке.
 
-Проект сделан под **GNOME Wayland**. Внутри: Rust, evdev/uinput и небольшое
-расширение GNOME Shell для переключения раскладки.
+Основная проверенная среда сейчас **GNOME Wayland**. Внутри: Rust, evdev/uinput
+и backend-слой для переключения раскладки. GNOME backend использует маленькое
+расширение GNOME Shell; KDE и X11 backend добавлены как экспериментальные.
 
 ### Возможности
 
 - Двойной Shift исправляет последнее слово, набранное не в той раскладке.
 - Работает прямо в приложениях, без копирования текста через буфер обмена.
 - Поддерживает GNOME Wayland через маленькое Shell-расширение.
+- Имеет экспериментальные backend-режимы для KDE и X11.
 - Есть быстрый CLI для конвертации текста из терминала.
 - Есть аккуратная помощь при наборе после пробела.
 - Есть точная автоподмена по пользовательскому словарю.
+- Есть режим `ptah_alexs`: жёсткая привязка раскладки к выбранным окнам.
 - Основной режим локальный: без облака, без сетевых запросов и без модели.
 
 ### Статус
@@ -70,9 +73,18 @@ GNOME Wayland окружении, третьи решали задачу не т
 Это ранняя публичная beta-версия.
 
 Основная проверенная среда: Ubuntu/GNOME Wayland с RU/EN раскладками.
-Расширение заявляет поддержку GNOME Shell 45, 46, 47 и 50. Другие версии GNOME,
-дистрибутивы, KDE, Sway, Hyprland и раскладки кроме RU/EN могут потребовать
-доработок.
+Расширение заявляет поддержку GNOME Shell 45, 46, 47 и 50.
+
+KDE и X11 backend появились после обсуждения на Linux.org.ru и пока считаются
+экспериментальными:
+
+- `layout_backend = "gnome"`: GNOME Shell extension + DBus bridge.
+- `layout_backend = "kde"`: `qdbus/qdbus6 org.kde.keyboard /Layouts setLayout`.
+- `layout_backend = "x11"`: `xkb-switch`, `xkblayout-state` или fallback
+  `setxkbmap`.
+
+Другие версии GNOME, дистрибутивы, Sway, Hyprland и раскладки кроме RU/EN могут
+потребовать доработок.
 
 Если присылаешь баг-репорт или пример набора, сначала убери приватный текст.
 
@@ -91,6 +103,18 @@ bash install.sh
 группа `input` и расширение GNOME.
 
 Потом набери слово не в той раскладке и нажми **Shift два раза**.
+
+### Обновление
+
+Если `lay` установлен из git-копии, обновление одной командой:
+
+```bash
+cd ~/projects/lay
+bash update.sh
+```
+
+Скрипт делает `git pull --ff-only`, пересобирает release-бинарники, обновляет
+GNOME extension и перезапускает `lay-daemon`.
 
 ### Extension ZIP
 
@@ -125,6 +149,11 @@ gnome-extensions enable lay@radislabus-star.github.io
 - Rust 1.75+
 - доступ к `/dev/input` через группу `input`
 - поддержка `uinput`
+
+Для экспериментального KDE backend нужен `qdbus` или `qdbus6`. Для
+экспериментального X11 backend лучше иметь `xkb-switch`; без него используется
+fallback через `setxkbmap`, который может менять текущую XKB-конфигурацию
+грубее, чем специализированные tools.
 
 Установщик может добавить текущего пользователя в группу `input`, но это
 начинает работать только после нового входа в систему.
@@ -183,11 +212,15 @@ extension/lay@radislabus-star.github.io/
 
 Меню держит основной сценарий коротким:
 
-- `Главное`: обычный триггер Double Shift;
-- `Исправлять`: помощь при наборе и точная автоподмена;
-- `Данные`: опциональное запоминание подтверждённых исправлений;
-- `Сервис`: остановка и запуск демона;
-- `Ещё`: LLM-эксперименты, 1/2 слова, тайминги и альтернативные триггеры.
+- `Помощь при наборе`: осторожная правка после пробела.
+- `Автоподмена`: точные пользовательские правила и typo-правки.
+- `Запоминать правки`: opt-in лог подтверждённых исправлений.
+- `Режим`: Replay или Smart.
+- `Область`: сколько слов брать для ручного double Shift.
+- `Арбитр`: LEM и auto-layout настройки.
+- `ptah_alexs`: жёсткая раскладка по окну.
+- `Коррекция`: включение/выключение слоёв помощника.
+- `Триггер`, `Тайминг`, `Daemon`, `О программе`: сервисные настройки.
 
 В публичном режиме нет кнопки для открытия сырого debug-лога.
 
@@ -270,6 +303,33 @@ extension/lay@radislabus-star.github.io/
 Это именно точные правила. Нечёткие исправления относятся к typing assist, а не
 к словарю автоподмены.
 
+### Режим ptah_alexs
+
+`ptah_alexs` — это не память последней раскладки окна. Это жёсткая политика:
+когда конкретное окно получает фокус, `lay` ставит назначенную раскладку.
+
+Пример:
+
+```text
+Terminal -> EN
+Browser  -> не трогать
+```
+
+Если терминал получил фокус, `lay` снова поставит EN, даже если раньше внутри
+него случайно включали RU. Правила задаются из трея: `ptah_alexs -> Текущее
+окно -> EN/RU/keep`.
+
+Конфиг хранится локально:
+
+```json
+{
+  "ptah_alexs_mode": true,
+  "ptah_alexs_rules": [
+    {"kind": "app_id", "value": "org.gnome.Terminal.desktop", "layout": "us", "label": "Terminal"}
+  ]
+}
+```
+
 ### Приватность
 
 К клавиатурным инструментам нужно относиться подозрительно. `lay-daemon` видит
@@ -351,7 +411,8 @@ bash install.sh
 - Короткий demo GIF/video для double Shift.
 - Больше регрессионных тестов из реальных принятых/отклонённых исправлений.
 - Ещё более понятные privacy-настройки.
-- Исследование KDE/Sway/Hyprland.
+- Довести KDE/X11 backend до подтверждённого рабочего статуса на чужих системах.
+- Исследование Sway/Hyprland.
 - Другие раскладки после стабилизации RU/EN.
 
 ## English
@@ -367,9 +428,10 @@ Press:   Shift Shift
 Result:  Привет
 ```
 
-`lay` is built for GNOME Wayland. It uses Rust, evdev/uinput, and a small GNOME
-Shell extension for layout switching. The normal path is local-first: no cloud
-service, no network call, and no model required.
+`lay` is primarily tested on GNOME Wayland. It uses Rust, evdev/uinput, and a
+layout backend layer. GNOME uses a small Shell extension; KDE and X11 backends
+are experimental. The normal path is local-first: no cloud service, no network
+call, and no model required.
 
 Quick install:
 
@@ -381,6 +443,13 @@ bash install.sh
 
 After installation, log out and log back in so the `input` group and GNOME
 extension are picked up.
+
+Update an existing git install:
+
+```bash
+cd ~/projects/lay
+bash update.sh
+```
 
 Extension ZIP for manual install or extensions.gnome.org upload:
 
@@ -401,6 +470,13 @@ Supported/tested target:
 - Wayland session
 - Rust 1.75+
 - RU/EN layouts
+
+Experimental:
+
+- KDE backend via `qdbus/qdbus6 org.kde.keyboard /Layouts setLayout`.
+- X11 backend via `xkb-switch`, `xkblayout-state`, or `setxkbmap` fallback.
+- `ptah_alexs` window policy mode for GNOME: force a selected window/app to RU,
+  EN, or keep.
 
 Useful CLI examples:
 

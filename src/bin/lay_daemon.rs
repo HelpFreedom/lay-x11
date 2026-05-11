@@ -163,6 +163,8 @@ struct LayConfig {
     mode: String,
     /// Engine for double-Shift correction: replay | smart.
     correction_engine: Option<String>,
+    /// Layout backend: auto | gnome | kde | x11.
+    layout_backend: String,
     /// Триггер: double-* | caps-lock | single-*
     trigger: String,
     /// Максимальная длительность каждого тапа (мс)
@@ -195,6 +197,7 @@ impl Default for LayConfig {
         Self {
             mode: "simple".into(),
             correction_engine: None,
+            layout_backend: "auto".into(),
             trigger: "double-lshift".into(),
             tap_max_ms: 200,
             shift_window_ms: 250,
@@ -236,6 +239,15 @@ impl LayConfig {
             _ if self.mode == "llm" => CorrectionEngine::Smart,
             _ => CorrectionEngine::Replay,
         }
+    }
+
+    fn active_layout_backend(&self) -> LayoutBackend {
+        resolve_layout_backend(
+            &self.layout_backend,
+            std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
+            std::env::var("DESKTOP_SESSION").ok().as_deref(),
+            std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
+        )
     }
 
     fn active_typing_assist_pipeline(&self) -> Vec<TypingAssistRuleConfig> {
@@ -287,6 +299,10 @@ fn active_replace_words() -> usize {
 
 fn active_correction_engine() -> CorrectionEngine {
     LayConfig::load().active_correction_engine()
+}
+
+fn active_layout_backend() -> LayoutBackend {
+    LayConfig::load().active_layout_backend()
 }
 
 fn active_auto_replace() -> bool {
@@ -366,6 +382,54 @@ enum CorrectionEngine {
     Smart,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayoutBackend {
+    Gnome,
+    Kde,
+    X11,
+}
+
+impl LayoutBackend {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Gnome => "gnome",
+            Self::Kde => "kde",
+            Self::X11 => "x11",
+        }
+    }
+}
+
+fn resolve_layout_backend(
+    configured: &str,
+    desktop: Option<&str>,
+    session: Option<&str>,
+    session_type: Option<&str>,
+) -> LayoutBackend {
+    match configured.trim().to_ascii_lowercase().as_str() {
+        "gnome" => return LayoutBackend::Gnome,
+        "kde" | "plasma" => return LayoutBackend::Kde,
+        "x11" | "xorg" => return LayoutBackend::X11,
+        _ => {}
+    }
+
+    let desktop = format!(
+        "{}:{}",
+        desktop.unwrap_or_default(),
+        session.unwrap_or_default()
+    )
+    .to_ascii_lowercase();
+    if desktop.contains("kde") || desktop.contains("plasma") {
+        return LayoutBackend::Kde;
+    }
+    if desktop.contains("gnome") {
+        return LayoutBackend::Gnome;
+    }
+    if session_type.is_some_and(|value| value.eq_ignore_ascii_case("x11")) {
+        return LayoutBackend::X11;
+    }
+    LayoutBackend::Gnome
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Correction {
     ReplayAll,
@@ -410,6 +474,12 @@ fn main() -> std::io::Result<()> {
         }
     ));
     let startup_cfg = LayConfig::load();
+    let startup_backend = startup_cfg.active_layout_backend();
+    log(&format!(
+        "► layout backend: {} (config={})",
+        startup_backend.label(),
+        startup_cfg.layout_backend
+    ));
     if !args.detect_only && startup_cfg.active_correction_engine() == CorrectionEngine::Smart {
         std::thread::spawn(|| match lay::llm::warm_up() {
             Ok(()) => log("► smart engine: модель прогрета заранее"),
@@ -417,8 +487,8 @@ fn main() -> std::io::Result<()> {
         });
     }
 
-    // DBus extension для переключения раскладки и TypeText fallback.
-    if !args.detect_only {
+    // GNOME backend uses the Shell extension for layout activation and TypeText fallback.
+    if !args.detect_only && startup_backend == LayoutBackend::Gnome {
         match call_ping() {
             Ok(reply) => {
                 log(&format!("► extension: {reply}"));
@@ -428,6 +498,8 @@ fn main() -> std::io::Result<()> {
                 log("⚠ работаю в detect-only");
             }
         }
+    } else if !args.detect_only {
+        log("► GNOME extension ping skipped for non-GNOME layout backend");
     }
 
     // Virtual keyboard через uinput для re-typing физических кнопок
@@ -483,8 +555,9 @@ fn listen_keyboard(
         device.name().unwrap_or("?")
     ));
     log(&format!(
-        "► config: mode={} replace_words={} auto_replace={} typing_assist={} auto_switch_layout={} lem2={} lem3={} trigger={} tap={}ms window={}ms debounce={}ms",
+        "► config: mode={} backend={} replace_words={} auto_replace={} typing_assist={} auto_switch_layout={} lem2={} lem3={} trigger={} tap={}ms window={}ms debounce={}ms",
         cfg.mode,
+        cfg.active_layout_backend().label(),
         cfg.replace_words,
         cfg.auto_replace,
         cfg.typing_assist,
@@ -1209,9 +1282,19 @@ impl WordBuffer {
 
                 let mut tail = (*word).to_vec();
                 mark_word_layout(&mut tail, target_is_ru);
-                self.current = tail;
                 self.prev_words.clear();
-                self.prev_had_trailing_space = false;
+                if replacement
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_whitespace)
+                {
+                    self.current.clear();
+                    self.prev_words.push(tail);
+                    self.prev_had_trailing_space = true;
+                } else {
+                    self.current = tail;
+                    self.prev_had_trailing_space = false;
+                }
                 self.replay_toggle_ready = true;
                 self.last_input = Instant::now();
                 return true;
@@ -1533,11 +1616,13 @@ fn handle_typing_assist_after_space(
     }
 
     let original_layout = read_current_layout_is_ru().ok();
-    let plan = plan_text_replacement(&original, &replacement).unwrap_or_else(|| TextReplacement {
-        move_left: 0,
-        backspaces: original.chars().count() as u32,
-        insert: replacement.clone(),
-        move_right: 0,
+    let plan = plan_committed_tail_replacement(&original, &replacement).unwrap_or_else(|| {
+        TextReplacement {
+            move_left: 0,
+            backspaces: original.chars().count() as u32,
+            insert: replacement.clone(),
+            move_right: 0,
+        }
     });
 
     if let Err(e) = apply_text_replacement(kbd, &plan) {
@@ -1701,13 +1786,14 @@ fn handle_double_shift(
         if text.trim().is_empty() || text == mapped_target {
             log("  2. text decision совпал с replay — replay для сохранения toggle");
         } else {
-            let plan =
-                plan_text_replacement(&mapped_orig, &text).unwrap_or_else(|| TextReplacement {
+            let plan = plan_committed_tail_replacement(&mapped_orig, &text).unwrap_or_else(|| {
+                TextReplacement {
                     move_left: 0,
                     backspaces: n_backspaces,
                     insert: text.clone(),
                     move_right: 0,
-                });
+                }
+            });
             if let Err(e) = apply_text_replacement(kbd, &plan) {
                 log(&format!("⚠ {kind} minimal replace failed: {e}"));
                 return None;
@@ -2076,9 +2162,28 @@ fn read_ibus_engine() -> Result<String, String> {
 }
 
 fn read_current_layout_is_ru() -> Result<bool, String> {
+    match active_layout_backend() {
+        LayoutBackend::Gnome => read_current_layout_gnome_is_ru(),
+        LayoutBackend::Kde => read_current_layout_kde_is_ru(),
+        LayoutBackend::X11 => read_current_layout_x11_is_ru(),
+    }
+}
+
+fn read_current_layout_gnome_is_ru() -> Result<bool, String> {
     call_current_layout()
-        .map(|id| id == "ru")
-        .or_else(|_| read_ibus_engine().map(|engine| engine.starts_with("xkb:ru")))
+        .map(|id| is_ru_layout_id(&id))
+        .or_else(|_| read_ibus_engine().map(|engine| is_ru_layout_id(&engine)))
+}
+
+fn read_current_layout_kde_is_ru() -> Result<bool, String> {
+    let qdbus = find_qdbus_command().ok_or_else(|| "qdbus/qdbus6 not found".to_string())?;
+    let layout = run_command_capture(qdbus, &["org.kde.keyboard", "/Layouts", "getCurrentLayout"])?;
+    Ok(is_ru_layout_id(&layout))
+}
+
+fn read_current_layout_x11_is_ru() -> Result<bool, String> {
+    let layout = read_x11_layout()?;
+    Ok(is_ru_layout_id(&layout))
 }
 
 fn call_list_layouts() -> Result<String, String> {
@@ -2531,6 +2636,18 @@ fn call_activate_layout(id: &str) -> Result<bool, String> {
 }
 
 fn switch_to_layout(layout_id: &str, ibus_engine: &str, target_is_ru: bool) -> Result<(), String> {
+    match active_layout_backend() {
+        LayoutBackend::Gnome => switch_to_gnome_layout(layout_id, ibus_engine, target_is_ru),
+        LayoutBackend::Kde => switch_to_kde_layout(layout_id, target_is_ru),
+        LayoutBackend::X11 => switch_to_x11_layout(layout_id, target_is_ru),
+    }
+}
+
+fn switch_to_gnome_layout(
+    layout_id: &str,
+    ibus_engine: &str,
+    target_is_ru: bool,
+) -> Result<(), String> {
     if !call_activate_layout(layout_id)? {
         return Err("ActivateLayout returned false".to_string());
     }
@@ -2549,6 +2666,33 @@ fn switch_to_layout(layout_id: &str, ibus_engine: &str, target_is_ru: bool) -> R
         Some(error) => format!("SetGlobalEngine failed: {error}; layout verify failed"),
         None => "layout verify failed".to_string(),
     })
+}
+
+fn switch_to_kde_layout(layout_id: &str, target_is_ru: bool) -> Result<(), String> {
+    let qdbus = find_qdbus_command().ok_or_else(|| "qdbus/qdbus6 not found".to_string())?;
+    run_command_capture(
+        qdbus,
+        &["org.kde.keyboard", "/Layouts", "setLayout", layout_id],
+    )?;
+    if verify_current_layout(target_is_ru) {
+        Ok(())
+    } else {
+        Err("KDE layout verify failed".to_string())
+    }
+}
+
+fn switch_to_x11_layout(layout_id: &str, target_is_ru: bool) -> Result<(), String> {
+    if command_exists("xkb-switch") {
+        run_command_capture("xkb-switch", &["-s", layout_id])?;
+    } else {
+        run_command_capture("setxkbmap", &[layout_id])?;
+    }
+
+    if verify_current_layout(target_is_ru) {
+        Ok(())
+    } else {
+        Err("X11 layout verify failed".to_string())
+    }
 }
 
 fn switch_to_target_layout(target_is_ru: bool) -> Result<&'static str, String> {
@@ -2575,6 +2719,9 @@ fn verify_current_layout(target_is_ru: bool) -> bool {
 }
 
 fn call_type_text(text: &str) -> Result<String, String> {
+    if active_layout_backend() != LayoutBackend::Gnome {
+        return Err("TypeText fallback is available only through the GNOME backend".to_string());
+    }
     call_dbus_type_text(text).or_else(|fast_error| {
         reset_dbus_connection();
         log(&format!(
@@ -2729,6 +2876,70 @@ fn run_gdbus(method: &str, args: &[&str]) -> Result<String, String> {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn run_command_capture(command: &str, args: &[&str]) -> Result<String, String> {
+    let out = Command::new(command)
+        .args(args)
+        .output()
+        .map_err(|e| format!("{command}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "{command}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn command_exists(command: &str) -> bool {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|dir| dir.join(command).is_file())
+}
+
+fn find_qdbus_command() -> Option<&'static str> {
+    ["qdbus6", "qdbus-qt6", "qdbus"]
+        .into_iter()
+        .find(|cmd| command_exists(cmd))
+}
+
+fn read_x11_layout() -> Result<String, String> {
+    if command_exists("xkb-switch") {
+        return run_command_capture("xkb-switch", &[]).map(|layout| normalize_layout_id(&layout));
+    }
+    if command_exists("xkblayout-state") {
+        return run_command_capture("xkblayout-state", &["print", "%s"])
+            .map(|layout| normalize_layout_id(&layout));
+    }
+
+    let query = run_command_capture("setxkbmap", &["-query"])?;
+    parse_setxkbmap_layout(&query).ok_or_else(|| format!("cannot parse setxkbmap output: {query}"))
+}
+
+fn parse_setxkbmap_layout(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key.trim() == "layout")
+            .then(|| normalize_layout_id(value.split(',').next().unwrap_or(value)))
+    })
+}
+
+fn normalize_layout_id(layout: &str) -> String {
+    let trimmed = layout.trim();
+    if let Some(rest) = trimmed.strip_prefix("xkb:") {
+        return rest.split(':').next().unwrap_or("").to_ascii_lowercase();
+    }
+    trimmed
+        .split([':', ' ', '\t', '\n'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+fn is_ru_layout_id(layout: &str) -> bool {
+    normalize_layout_id(layout) == "ru"
 }
 
 // ─── Поиск устройства клавиатуры ────────────────────────────
@@ -4496,6 +4707,30 @@ fn push_with_overlap(out: &mut String, next: &str) {
 }
 
 fn plan_text_replacement(original: &str, replacement: &str) -> Option<TextReplacement> {
+    plan_text_replacement_with_options(original, replacement, true)
+}
+
+fn plan_committed_tail_replacement(original: &str, replacement: &str) -> Option<TextReplacement> {
+    let original_ends_with_space = original
+        .chars()
+        .next_back()
+        .is_some_and(char::is_whitespace);
+    let replacement_ends_with_space = replacement
+        .chars()
+        .next_back()
+        .is_some_and(char::is_whitespace);
+    if !original_ends_with_space || !replacement_ends_with_space {
+        return plan_text_replacement(original, replacement);
+    }
+
+    plan_text_replacement_with_options(original, replacement, false)
+}
+
+fn plan_text_replacement_with_options(
+    original: &str,
+    replacement: &str,
+    keep_trailing_whitespace_suffix: bool,
+) -> Option<TextReplacement> {
     if original == replacement {
         return None;
     }
@@ -4517,6 +4752,11 @@ fn plan_text_replacement(original: &str, replacement: &str) -> Option<TextReplac
         && original_chars[original_chars.len() - 1 - suffix]
             == replacement_chars[replacement_chars.len() - 1 - suffix]
     {
+        if !keep_trailing_whitespace_suffix
+            && original_chars[original_chars.len() - 1 - suffix].is_whitespace()
+        {
+            break;
+        }
         suffix += 1;
     }
 
@@ -5702,6 +5942,50 @@ mod tests {
         assert_eq!(plan.move_right, 1);
     }
 
+    #[test]
+    fn committed_tail_plan_reinserts_trailing_space_after_short_replacement() {
+        let plan = plan_committed_tail_replacement("double b ", "double и ").expect("replacement");
+
+        assert_eq!(plan.move_left, 0);
+        assert_eq!(plan.backspaces, 2);
+        assert_eq!(plan.insert, "и ");
+        assert_eq!(plan.move_right, 0);
+    }
+
+    #[test]
+    fn committed_tail_plan_does_not_leave_space_behind_single_letter_fix() {
+        let plan =
+            plan_committed_tail_replacement("чтобы точнр ", "чтобы точно ").expect("replacement");
+
+        assert_eq!(plan.move_left, 0);
+        assert_eq!(plan.backspaces, 2);
+        assert_eq!(plan.insert, "о ");
+        assert_eq!(plan.move_right, 0);
+    }
+
+    #[test]
+    fn replacement_memory_keeps_space_boundary_after_i_autofix() {
+        let mut buffer = WordBuffer::new();
+        push_text_as_layout(&mut buffer, "double b ", false);
+        let events = buffer
+            .last_completed_words_events(2)
+            .expect("completed two-word tail");
+        let original = map_original_events(&events);
+        let replacement = "double и ";
+        let plan = plan_committed_tail_replacement(&original, replacement).expect("replacement");
+
+        assert!(buffer.remember_replacement_last_word_for_replay(&events, &plan, replacement));
+        assert!(buffer.current.is_empty());
+        assert!(buffer.prev_had_trailing_space);
+        assert_eq!(buffer.prev_words.len(), 1);
+        assert_eq!(map_original_events(&buffer.prev_words[0]), "и");
+
+        push_text_as_layout(&mut buffer, "слово", true);
+        let (tail, _) = buffer.what_to_replay(2).expect("two-word tail");
+
+        assert_eq!(map_original_events(&tail), "и слово");
+    }
+
     fn push_key_events(buffer: &mut WordBuffer, keys: &[(KeyCode, bool)], layout_is_ru: bool) {
         for (key, shift) in keys {
             buffer.push(KeyEvent {
@@ -5911,6 +6195,46 @@ mod tests {
         assert_eq!(smart.active_replace_words(), 2);
         assert_eq!(simple.active_correction_engine(), CorrectionEngine::Replay);
         assert_eq!(smart.active_correction_engine(), CorrectionEngine::Smart);
+    }
+
+    #[test]
+    fn layout_backend_can_be_explicit_or_auto_detected() {
+        assert_eq!(
+            resolve_layout_backend("gnome", Some("KDE"), None, Some("wayland")),
+            LayoutBackend::Gnome
+        );
+        assert_eq!(
+            resolve_layout_backend("kde", Some("GNOME"), None, Some("wayland")),
+            LayoutBackend::Kde
+        );
+        assert_eq!(
+            resolve_layout_backend("x11", Some("GNOME"), None, Some("wayland")),
+            LayoutBackend::X11
+        );
+        assert_eq!(
+            resolve_layout_backend("auto", Some("KDE"), Some("plasma"), Some("wayland")),
+            LayoutBackend::Kde
+        );
+        assert_eq!(
+            resolve_layout_backend("auto", Some("GNOME"), None, Some("wayland")),
+            LayoutBackend::Gnome
+        );
+        assert_eq!(
+            resolve_layout_backend("auto", None, None, Some("x11")),
+            LayoutBackend::X11
+        );
+    }
+
+    #[test]
+    fn parses_x11_layout_tool_output() {
+        assert_eq!(
+            parse_setxkbmap_layout("rules: evdev\nmodel: pc105\nlayout: us,ru\n"),
+            Some("us".to_string())
+        );
+        assert_eq!(normalize_layout_id(" ru\n"), "ru");
+        assert_eq!(normalize_layout_id("xkb:ru::rus"), "ru");
+        assert!(is_ru_layout_id("xkb:ru"));
+        assert!(!is_ru_layout_id("xkb:us"));
     }
 
     #[test]

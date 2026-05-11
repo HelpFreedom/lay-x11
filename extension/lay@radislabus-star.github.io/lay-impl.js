@@ -7,6 +7,7 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import Pango from 'gi://Pango';
+import Shell from 'gi://Shell';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -18,7 +19,7 @@ import {getInputSourceManager} from 'resource:///org/gnome/shell/ui/status/keybo
 
 const CONFIG_PATH = GLib.get_home_dir() + '/.config/lay/config.json';
 const STATS_PATH = GLib.get_home_dir() + '/.local/share/lay/stats.json';
-const APP_VERSION = '0.1.127';
+const APP_VERSION = '0.1.128';
 const APP_DESCRIPTION = 'Double Shift layout rescue for Linux/GNOME Wayland';
 const APP_RELEASE_DATE = '2026-05-11';
 const APP_LICENSE = 'MIT';
@@ -41,6 +42,9 @@ const LEM_2_TOOLTIP = 'LEM-арбитр для двух слов: сравнив
     + 'и выбирает более естественный, не генерируя новый текст.';
 const LEM_3_TOOLTIP = 'LEM-арбитр для трех слов и длиннее: нужен для смешанных RU/EN\n'
     + 'фраз, где соседние слова помогают понять раскладку.';
+const PTAH_ALEXS_TOOLTIP = 'Жёсткая раскладка по окну: при фокусе окна lay ставит\n'
+    + 'заданную раскладку, а не вспоминает последнюю случайную.';
+const PTAH_RULE_LIMIT = 80;
 const TYPING_RULES = [
     {id: 'moved_prefix_pair', label: 'Перенос буквы'},
     {id: 'split_word_pair', label: 'Разбитое слово'},
@@ -70,6 +74,7 @@ const DEFAULT_TYPING_PIPELINE = TYPING_RULES.map((rule, idx) => ({
 const DEFAULTS = {
     mode: 'simple',
     correction_engine: 'replay',
+    layout_backend: 'auto',
     trigger: 'double-lshift',
     tap_max_ms: 200,
     shift_window_ms: 250,
@@ -80,6 +85,8 @@ const DEFAULTS = {
     auto_switch_layout: true,
     lem_2_words: true,
     lem_3_words: true,
+    ptah_alexs_mode: false,
+    ptah_alexs_rules: [],
     typing_assist_pipeline: DEFAULT_TYPING_PIPELINE,
     learning_log: false,
 };
@@ -92,20 +99,62 @@ function loadConfig() {
         if (parsed.correction_engine === undefined)
             cfg.correction_engine = parsed.mode === 'llm' ? 'smart' : 'replay';
         cfg.typing_assist_pipeline = normalizeTypingPipeline(parsed.typing_assist_pipeline);
+        cfg.ptah_alexs_mode = !!cfg.ptah_alexs_mode;
+        cfg.ptah_alexs_rules = normalizePtahRules(parsed.ptah_alexs_rules);
         return cfg;
     } catch(e) {
         return {
             ...DEFAULTS,
             typing_assist_pipeline: normalizeTypingPipeline(DEFAULT_TYPING_PIPELINE),
+            ptah_alexs_rules: [],
         };
     }
 }
 function saveConfig(cfg) {
     try { Gio.File.new_for_path(GLib.get_home_dir() + '/.config/lay').make_directory_with_parents(null); } catch(e) {}
     cfg.typing_assist_pipeline = normalizeTypingPipeline(cfg.typing_assist_pipeline);
+    cfg.ptah_alexs_rules = normalizePtahRules(cfg.ptah_alexs_rules);
     const bytes = new TextEncoder().encode(JSON.stringify(cfg, null, 2));
     Gio.File.new_for_path(CONFIG_PATH).replace_contents(
         bytes, null, false, Gio.FileCreateFlags.REPLACE_DESTINATION, null);
+}
+function normalizePtahLayout(layout) {
+    const id = String(layout ?? '').trim().toLowerCase();
+    if (['ru', 'rus', 'russian'].includes(id))
+        return 'ru';
+    if (['us', 'en', 'eng', 'english'].includes(id))
+        return 'us';
+    if (id === 'keep')
+        return 'keep';
+    return '';
+}
+function normalizePtahRules(saved) {
+    if (!Array.isArray(saved))
+        return [];
+    const out = [];
+    const seen = new Set();
+    for (const item of saved) {
+        if (!item)
+            continue;
+        const kind = String(item.kind ?? '').trim();
+        const value = String(item.value ?? '').trim();
+        const layout = normalizePtahLayout(item.layout);
+        if (!['app_id', 'wm_class', 'wm_class_instance'].includes(kind) || !value || !layout)
+            continue;
+        const key = `${kind}:${value.toLowerCase()}`;
+        if (seen.has(key))
+            continue;
+        seen.add(key);
+        out.push({
+            kind,
+            value,
+            layout,
+            label: String(item.label ?? value).trim().slice(0, 80) || value,
+        });
+        if (out.length >= PTAH_RULE_LIMIT)
+            break;
+    }
+    return out;
 }
 function normalizeTypingPipeline(saved) {
     const byId = new Map(DEFAULT_TYPING_PIPELINE.map(rule => [
@@ -155,6 +204,68 @@ function openUri(uri) {
     } catch(e) {
         try { Gio.Subprocess.new(['xdg-open', uri], Gio.SubprocessFlags.NONE); } catch(_e) {}
     }
+}
+function normalizeLayoutKind(id) {
+    const value = String(id ?? '').trim().toLowerCase();
+    if (!value)
+        return '';
+    if (value === 'ru' || value.includes(':ru') || value.includes('russian') || value.includes('rus'))
+        return 'ru';
+    if (value === 'us' || value === 'en' || value.includes(':us') || value.includes('english') || value.includes('eng'))
+        return 'us';
+    return value;
+}
+function currentLayoutKind() {
+    try {
+        return normalizeLayoutKind(getInputSourceManager().currentSource?.id ?? '');
+    } catch(e) {
+        return '';
+    }
+}
+function activateLayoutId(id) {
+    try {
+        const mgr = getInputSourceManager();
+        for (const i in mgr.inputSources)
+            if (mgr.inputSources[i].id === id) {
+                mgr.inputSources[i].activate();
+                return true;
+            }
+
+        const targetKind = normalizeLayoutKind(id);
+        for (const i in mgr.inputSources)
+            if (normalizeLayoutKind(mgr.inputSources[i].id) === targetKind) {
+                mgr.inputSources[i].activate();
+                return true;
+            }
+    } catch(e) {}
+    return false;
+}
+function focusedWindow() {
+    try {
+        return global.display.focus_window ?? global.display.get_focus_window?.() ?? null;
+    } catch(e) {
+        return null;
+    }
+}
+function focusedWindowInfo() {
+    const win = focusedWindow();
+    if (!win)
+        return null;
+
+    let app = null;
+    try { app = Shell.WindowTracker.get_default().get_window_app(win); } catch(e) {}
+    const appId = String(app?.get_id?.() ?? '').trim();
+    const appName = String(app?.get_name?.() ?? '').trim();
+    const wmClass = String(win.get_wm_class?.() ?? '').trim();
+    const wmClassInstance = String(win.get_wm_class_instance?.() ?? '').trim();
+
+    if (appId)
+        return {kind: 'app_id', value: appId, label: appName || appId, appId, wmClass, wmClassInstance};
+    if (wmClass)
+        return {kind: 'wm_class', value: wmClass, label: wmClass, appId, wmClass, wmClassInstance};
+    if (wmClassInstance)
+        return {kind: 'wm_class_instance', value: wmClassInstance, label: wmClassInstance, appId, wmClass, wmClassInstance};
+    return null;
 }
 
 // ─── DBus ──────────────────────────────────────────────────
@@ -207,12 +318,7 @@ class LayDaemonService {
         }
     }
     ActivateLayout(id) {
-        try {
-            const mgr = getInputSourceManager();
-            for (const i in mgr.inputSources)
-                if (mgr.inputSources[i].id === id) { mgr.inputSources[i].activate(); return true; }
-        } catch(e) {}
-        return false;
+        return activateLayoutId(id);
     }
     CurrentLayout() {
         try {
@@ -279,7 +385,9 @@ class LayIndicator extends PanelMenu.Button {
 
         this._mgr = getInputSourceManager();
         this._srcId = this._mgr.connect('current-source-changed', () => this._refreshLayout());
+        this._focusId = global.display.connect('notify::focus-window', () => this._onFocusWindowChanged());
         this._refreshLayout();
+        this._schedulePtahApply(80);
     }
 
     _buildMenu() {
@@ -341,6 +449,7 @@ class LayIndicator extends PanelMenu.Button {
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         this.menu.addMenuItem(this._arbiterMenu());
+        this.menu.addMenuItem(this._ptahAlexsMenu());
         this.menu.addMenuItem(this._correctionPipelineMenu());
         this.menu.addMenuItem(this._triggerMenu());
         this.menu.addMenuItem(this._timingMenu());
@@ -429,6 +538,203 @@ class LayIndicator extends PanelMenu.Button {
             LEM_3_TOOLTIP
         ));
         return item;
+    }
+
+    _ptahAlexsMenu() {
+        const item = new PopupMenu.PopupSubMenuMenuItem('ptah_alexs', false);
+        const mode = new PopupMenu.PopupSwitchMenuItem(
+            'Жёстко по окну',
+            !!this._cfg.ptah_alexs_mode,
+            {}
+        );
+        mode.connect('toggled', (_item, state) => {
+            this._cfg.ptah_alexs_mode = state;
+            this._saveAndRefresh();
+            this._schedulePtahApply(20);
+        });
+        this._toggleButtons.ptah_alexs_mode = mode;
+        this._attachTooltip(mode, PTAH_ALEXS_TOOLTIP);
+        item.menu.addMenuItem(mode);
+
+        this._ptahWindowLabel = new St.Label({
+            text: this._ptahCurrentWindowText(),
+            style: COMPACT_SUBTITLE_STYLE,
+        });
+        const current = new PopupMenu.PopupBaseMenuItem({
+            activate: false,
+            reactive: false,
+            can_focus: false,
+        });
+        current.reactive = false;
+        current.can_focus = false;
+        current.style = 'padding:3px 12px 2px 12px;';
+        current.add_child(this._ptahWindowLabel);
+        item.menu.addMenuItem(current);
+
+        item.menu.addMenuItem(this._ptahAssignRow());
+
+        const rules = normalizePtahRules(this._cfg.ptah_alexs_rules);
+        if (rules.length > 0) {
+            item.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+            for (const rule of rules.slice(0, 8))
+                item.menu.addMenuItem(this._ptahRuleRow(rule));
+            if (rules.length > 8)
+                item.menu.addMenuItem(this._mutedTextRow(`ещё правил: ${rules.length - 8}`));
+        } else {
+            item.menu.addMenuItem(this._mutedTextRow('правил пока нет'));
+        }
+        return item;
+    }
+
+    _ptahAssignRow() {
+        const item = new PopupMenu.PopupBaseMenuItem({activate: false, reactive: false, can_focus: false});
+        item.reactive = false;
+        item.can_focus = false;
+        item.style = 'padding:4px 12px;';
+        item.add_child(new St.Label({
+            text: 'Текущее окно',
+            y_align: Clutter.ActorAlign.CENTER,
+            x_expand: true,
+            style: 'font-weight:bold;',
+        }));
+
+        const controls = new St.BoxLayout({style: 'spacing:4px;'});
+        controls.add_child(this._textStepButton('EN', () => this._setPtahRuleForFocusedWindow('us')));
+        controls.add_child(this._textStepButton('RU', () => this._setPtahRuleForFocusedWindow('ru')));
+        controls.add_child(this._textStepButton('keep', () => this._setPtahRuleForFocusedWindow('keep')));
+        controls.add_child(this._textStepButton('×', () => this._removePtahRuleForFocusedWindow()));
+        item.add_child(controls);
+        return item;
+    }
+
+    _ptahRuleRow(rule) {
+        const item = new PopupMenu.PopupBaseMenuItem({activate: false, reactive: false, can_focus: false});
+        item.reactive = false;
+        item.can_focus = false;
+        item.style = 'padding:3px 12px;';
+
+        const label = new St.Label({
+            text: `${rule.label} → ${this._ptahLayoutLabel(rule.layout)}`,
+            y_align: Clutter.ActorAlign.CENTER,
+            x_expand: true,
+            style: COMPACT_SUBTITLE_STYLE,
+        });
+        item.add_child(label);
+        item.add_child(this._textStepButton('×', () => this._removePtahRule(rule.kind, rule.value)));
+        return item;
+    }
+
+    _mutedTextRow(text) {
+        const item = new PopupMenu.PopupBaseMenuItem({activate: false, reactive: false, can_focus: false});
+        item.reactive = false;
+        item.can_focus = false;
+        item.style = 'padding:3px 12px;';
+        item.add_child(new St.Label({
+            text,
+            style: COMPACT_SUBTITLE_STYLE,
+        }));
+        return item;
+    }
+
+    _ptahCurrentWindowText() {
+        const info = focusedWindowInfo();
+        if (!info)
+            return 'текущее окно: не определено';
+        const rule = this._findPtahRule(info);
+        const suffix = rule ? ` → ${this._ptahLayoutLabel(rule.layout)}` : '';
+        return `текущее: ${info.label}${suffix}`;
+    }
+
+    _ptahLayoutLabel(layout) {
+        return {
+            us: 'EN',
+            ru: 'RU',
+            keep: 'не трогать',
+        }[layout] ?? String(layout ?? '');
+    }
+
+    _setPtahRuleForFocusedWindow(layout) {
+        const info = focusedWindowInfo();
+        if (!info)
+            return;
+        const normalized = normalizePtahLayout(layout);
+        if (!normalized)
+            return;
+        const rules = normalizePtahRules(this._cfg.ptah_alexs_rules)
+            .filter(rule => !this._samePtahIdentity(rule, info));
+        rules.push({
+            kind: info.kind,
+            value: info.value,
+            layout: normalized,
+            label: info.label,
+        });
+        this._cfg.ptah_alexs_rules = normalizePtahRules(rules);
+        this._cfg.ptah_alexs_mode = true;
+        this._saveAndRebuildMenu();
+        this._schedulePtahApply(20);
+    }
+
+    _removePtahRuleForFocusedWindow() {
+        const info = focusedWindowInfo();
+        if (!info)
+            return;
+        this._removePtahRule(info.kind, info.value);
+    }
+
+    _removePtahRule(kind, value) {
+        this._cfg.ptah_alexs_rules = normalizePtahRules(this._cfg.ptah_alexs_rules)
+            .filter(rule => !(rule.kind === kind && rule.value.toLowerCase() === String(value).toLowerCase()));
+        this._saveAndRebuildMenu();
+        this._schedulePtahApply(20);
+    }
+
+    _findPtahRule(info) {
+        for (const rule of normalizePtahRules(this._cfg.ptah_alexs_rules)) {
+            if (this._samePtahIdentity(rule, info))
+                return rule;
+            if (rule.kind === 'app_id' && rule.value === info.appId)
+                return rule;
+            if (rule.kind === 'wm_class' && rule.value === info.wmClass)
+                return rule;
+            if (rule.kind === 'wm_class_instance' && rule.value === info.wmClassInstance)
+                return rule;
+        }
+        return null;
+    }
+
+    _samePtahIdentity(rule, info) {
+        return rule.kind === info.kind && rule.value.toLowerCase() === info.value.toLowerCase();
+    }
+
+    _onFocusWindowChanged() {
+        if (this._ptahWindowLabel)
+            this._ptahWindowLabel.text = this._ptahCurrentWindowText();
+        this._schedulePtahApply(50);
+    }
+
+    _schedulePtahApply(delayMs = 50) {
+        if (this._ptahApplyId)
+            GLib.Source.remove(this._ptahApplyId);
+        this._ptahApplyId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delayMs, () => {
+            this._ptahApplyId = 0;
+            this._applyPtahAlexsPolicy();
+            return false;
+        });
+    }
+
+    _applyPtahAlexsPolicy() {
+        if (!this._cfg.ptah_alexs_mode)
+            return;
+        const info = focusedWindowInfo();
+        if (!info)
+            return;
+        const rule = this._findPtahRule(info);
+        if (!rule || rule.layout === 'keep')
+            return;
+        if (currentLayoutKind() === rule.layout)
+            return;
+        if (activateLayoutId(rule.layout))
+            this._refreshLayout();
     }
 
     _correctionPipelineMenu() {
@@ -724,6 +1030,8 @@ class LayIndicator extends PanelMenu.Button {
             this._triggerMenuItem.label.text = `Триггер: ${this._triggerLabel(this._cfg.trigger)}`;
         if (this._aboutConfigLabel)
             this._aboutConfigLabel.text = `Настройки: ${this._aboutConfigText()}`;
+        if (this._ptahWindowLabel)
+            this._ptahWindowLabel.text = this._ptahCurrentWindowText();
         this._refreshStats();
         for (const [id, button] of Object.entries(this._engineButtons ?? {}))
             this._setButtonActive(button, id === this._cfg.correction_engine);
@@ -744,6 +1052,8 @@ class LayIndicator extends PanelMenu.Button {
     _saveAndRefresh() {
         this._cfg.replace_words = Math.max(1, Math.min(3, this._cfg.replace_words));
         this._cfg.correction_engine = this._cfg.correction_engine === 'smart' ? 'smart' : 'replay';
+        this._cfg.ptah_alexs_mode = !!this._cfg.ptah_alexs_mode;
+        this._cfg.ptah_alexs_rules = normalizePtahRules(this._cfg.ptah_alexs_rules);
         this._cfg.mode = 'simple';
         this._refreshSelections();
         saveConfig(this._cfg);
@@ -796,7 +1106,8 @@ class LayIndicator extends PanelMenu.Button {
     _aboutConfigText() {
         const autoSwitch = this._cfg.auto_switch_layout ? 'авто-layout' : 'layout вручную';
         const lem = `LEM ${this._cfg.lem_2_words ? '2' : '-'}${this._cfg.lem_3_words ? '/3' : ''}`;
-        return `${this._engineLabel()} · ${this._cfg.replace_words} сл. · ${lem} · ${autoSwitch} · ${this._triggerLabel(this._cfg.trigger)}`;
+        const ptah = this._cfg.ptah_alexs_mode ? 'ptah on' : 'ptah off';
+        return `${this._engineLabel()} · ${this._cfg.replace_words} сл. · ${lem} · ${autoSwitch} · ${ptah} · ${this._triggerLabel(this._cfg.trigger)}`;
     }
 
     _aboutStatsText() {
@@ -929,7 +1240,12 @@ class LayIndicator extends PanelMenu.Button {
         this._clearStatusRefreshes();
         this._stopStatusBlink();
         this._hideTooltip();
+        if (this._ptahApplyId) {
+            GLib.Source.remove(this._ptahApplyId);
+            this._ptahApplyId = 0;
+        }
         if (this._srcId) { this._mgr.disconnect(this._srcId); this._srcId = 0; }
+        if (this._focusId) { global.display.disconnect(this._focusId); this._focusId = 0; }
         super.destroy();
     }
 });
