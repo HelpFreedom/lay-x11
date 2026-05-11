@@ -8,6 +8,10 @@
 
 Напечатал слово не в той раскладке? Нажми **Shift два раза** и продолжай писать.
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/radislabus-star/lay-public/main/scripts/install-remote.sh | bash
+```
+
 [![Rust](https://img.shields.io/badge/Rust-1.75+-orange?logo=rust)](https://www.rust-lang.org/)
 [![GNOME](https://img.shields.io/badge/GNOME-45--47%2C%2050-4A86CF?logo=gnome)](https://gnome.org/)
 [![Wayland](https://img.shields.io/badge/Wayland-native-blue)](https://wayland.freedesktop.org/)
@@ -92,6 +96,17 @@ KDE и X11 backend появились после обсуждения на Linux
 
 Обычная установка ставит всё сразу: Rust-бинарники, user systemd-сервис
 `lay-daemon` и GNOME Shell extension.
+
+Короткая установка одной командой:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/radislabus-star/lay-public/main/scripts/install-remote.sh | bash
+```
+
+Она поставит базовые зависимости, Rust, скачает `lay` в `~/projects/lay` и
+запустит `install.sh`.
+
+Ручной вариант:
 
 ```bash
 git clone https://github.com/radislabus-star/lay-public.git ~/projects/lay
@@ -434,6 +449,12 @@ are experimental. The normal path is local-first: no cloud service, no network
 call, and no model required.
 
 Quick install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/radislabus-star/lay-public/main/scripts/install-remote.sh | bash
+```
+
+Manual install:
 
 ```bash
 git clone https://github.com/radislabus-star/lay-public.git ~/projects/lay
