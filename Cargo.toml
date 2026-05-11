@@ -1,6 +1,6 @@
 [package]
 name = "lay"
-version = "0.1.126"
+version = "0.1.127"
 edition = "2021"
 description = "Double Shift layout rescue for Linux/GNOME Wayland"
 license = "MIT"
@@ -29,6 +29,10 @@ path = "src/bin/lay_test_input.rs"
 [[bin]]
 name = "lay-ngram-corpus"
 path = "src/bin/lay_ngram_corpus.rs"
+
+[[bin]]
+name = "lay-lem-research"
+path = "src/bin/lay_lem_research.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

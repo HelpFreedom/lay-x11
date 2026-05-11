@@ -18,9 +18,9 @@ import {getInputSourceManager} from 'resource:///org/gnome/shell/ui/status/keybo
 
 const CONFIG_PATH = GLib.get_home_dir() + '/.config/lay/config.json';
 const STATS_PATH = GLib.get_home_dir() + '/.local/share/lay/stats.json';
-const APP_VERSION = '0.1.126';
+const APP_VERSION = '0.1.127';
 const APP_DESCRIPTION = 'Double Shift layout rescue for Linux/GNOME Wayland';
-const APP_RELEASE_DATE = '2026-05-10';
+const APP_RELEASE_DATE = '2026-05-11';
 const APP_LICENSE = 'MIT';
 const APP_URL = 'https://github.com/radislabus-star/lay-public';
 const APP_PLATFORM = 'GNOME Wayland';
@@ -33,8 +33,40 @@ const LEARNING_LOG_TOOLTIP = 'Запоминать правки работает
     + '• после auto/smart lay ждёт до 30 секунд,\n'
     + '  удалишь ли ты результат и введёшь свой вариант.\n'
     + 'Если удалил и перепечатал — это считается твоей правкой.';
+const AUTO_REPLACE_TOOLTIP = 'Когда включено: typo-правки после пробела и точные автоподмены.\n'
+    + 'Когда выключено: остаётся только безопасный авто-layout EN/RU после пробела.';
 const AUTO_SWITCH_TOOLTIP = 'После автоматической помощи при наборе lay оставляет активной\n'
     + 'раскладку исправленного текста. Double Shift переключает раскладку всегда.';
+const LEM_2_TOOLTIP = 'LEM-арбитр для двух слов: сравнивает готовые варианты хвоста\n'
+    + 'и выбирает более естественный, не генерируя новый текст.';
+const LEM_3_TOOLTIP = 'LEM-арбитр для трех слов и длиннее: нужен для смешанных RU/EN\n'
+    + 'фраз, где соседние слова помогают понять раскладку.';
+const TYPING_RULES = [
+    {id: 'moved_prefix_pair', label: 'Перенос буквы'},
+    {id: 'split_word_pair', label: 'Разбитое слово'},
+    {id: 'visual_b', label: 'b → в/и'},
+    {id: 'personal_phrase', label: 'Правила: фраза'},
+    {id: 'personal_token', label: 'Правила: слово'},
+    {id: 'duplicate_layout_prefix', label: 'Лишняя первая буква'},
+    {id: 'layout_technical', label: 'Тех. токены'},
+    {id: 'layout_ru_to_en', label: 'RU → EN'},
+    {id: 'layout_en_to_ru', label: 'EN → RU'},
+    {id: 'cyrillic_case', label: 'Регистр RU'},
+    {id: 'hard_sign', label: 'ь/ъ'},
+    {id: 'adjacent_transposition', label: 'Буквы местами'},
+    {id: 'repeated_letter', label: 'Повтор буквы'},
+    {id: 'single_letter_substitution', label: 'Соседняя клавиша'},
+    {id: 'verb_ending', label: 'Окончание'},
+    {id: 'vowel_confusion', label: 'Гласные'},
+    {id: 'extra_letters', label: 'Лишние буквы'},
+    {id: 'missing_letter', label: 'Пропущенная буква'},
+    {id: 'glued_phrase', label: 'Склейка слов'},
+];
+const DEFAULT_TYPING_PIPELINE = TYPING_RULES.map((rule, idx) => ({
+    id: rule.id,
+    enabled: true,
+    priority: (idx + 1) * 10,
+}));
 const DEFAULTS = {
     mode: 'simple',
     correction_engine: 'replay',
@@ -46,6 +78,9 @@ const DEFAULTS = {
     auto_replace: false,
     typing_assist: false,
     auto_switch_layout: true,
+    lem_2_words: true,
+    lem_3_words: true,
+    typing_assist_pipeline: DEFAULT_TYPING_PIPELINE,
     learning_log: false,
 };
 
@@ -56,14 +91,43 @@ function loadConfig() {
         const cfg = {...DEFAULTS, ...parsed};
         if (parsed.correction_engine === undefined)
             cfg.correction_engine = parsed.mode === 'llm' ? 'smart' : 'replay';
+        cfg.typing_assist_pipeline = normalizeTypingPipeline(parsed.typing_assist_pipeline);
         return cfg;
-    } catch(e) { return {...DEFAULTS}; }
+    } catch(e) {
+        return {
+            ...DEFAULTS,
+            typing_assist_pipeline: normalizeTypingPipeline(DEFAULT_TYPING_PIPELINE),
+        };
+    }
 }
 function saveConfig(cfg) {
     try { Gio.File.new_for_path(GLib.get_home_dir() + '/.config/lay').make_directory_with_parents(null); } catch(e) {}
+    cfg.typing_assist_pipeline = normalizeTypingPipeline(cfg.typing_assist_pipeline);
     const bytes = new TextEncoder().encode(JSON.stringify(cfg, null, 2));
     Gio.File.new_for_path(CONFIG_PATH).replace_contents(
         bytes, null, false, Gio.FileCreateFlags.REPLACE_DESTINATION, null);
+}
+function normalizeTypingPipeline(saved) {
+    const byId = new Map(DEFAULT_TYPING_PIPELINE.map(rule => [
+        rule.id,
+        {...rule},
+    ]));
+    if (Array.isArray(saved)) {
+        for (const item of saved) {
+            if (!item || !byId.has(item.id))
+                continue;
+            const rule = byId.get(item.id);
+            rule.enabled = item.enabled !== false;
+            if (Number.isFinite(item.priority) && item.priority > 0)
+                rule.priority = item.priority;
+        }
+    }
+    return [...byId.values()]
+        .sort((a, b) => a.priority - b.priority)
+        .map((rule, idx) => ({...rule, priority: (idx + 1) * 10}));
+}
+function typingRuleLabel(id) {
+    return TYPING_RULES.find(rule => rule.id === id)?.label ?? id;
 }
 function loadStats() {
     try {
@@ -187,7 +251,7 @@ class LayIndicator extends PanelMenu.Button {
     _init() {
         super._init(0.0, 'lay');
         this._cfg = loadConfig();
-        this._cfg.replace_words = Math.max(1, Math.min(2, this._cfg.replace_words));
+        this._cfg.replace_words = Math.max(1, Math.min(3, this._cfg.replace_words));
         this._cfg.correction_engine = this._cfg.correction_engine === 'smart' ? 'smart' : 'replay';
 
         this._panelBox = new St.BoxLayout({
@@ -226,6 +290,7 @@ class LayIndicator extends PanelMenu.Button {
         this._triggerItems = {};
         this._toggleButtons = {};
         this._statusRefreshIds = [];
+        this._cfg.typing_assist_pipeline = normalizeTypingPipeline(this._cfg.typing_assist_pipeline);
 
         this._statusItem = this._headerItem();
         this.menu.addMenuItem(this._statusItem);
@@ -233,12 +298,11 @@ class LayIndicator extends PanelMenu.Button {
 
         this.menu.addMenuItem(this._switchItem('Помощь при наборе', 'typing_assist', true));
         this.menu.addMenuItem(this._switchItem(
-            'Автопереключение',
-            'auto_switch_layout',
-            false,
-            AUTO_SWITCH_TOOLTIP
+            'Автоподмена',
+            'auto_replace',
+            true,
+            AUTO_REPLACE_TOOLTIP
         ));
-        this.menu.addMenuItem(this._switchItem('Автоподмена', 'auto_replace', true));
         this.menu.addMenuItem(this._switchItem(
             'Запоминать правки',
             'learning_log',
@@ -269,9 +333,15 @@ class LayIndicator extends PanelMenu.Button {
                 this._cfg.replace_words = 2;
                 this._saveAndRefresh();
             }],
+            ['3', '3 слова', () => {
+                this._cfg.replace_words = 3;
+                this._saveAndRefresh();
+            }],
         ], this._scopeButtons));
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        this.menu.addMenuItem(this._arbiterMenu());
+        this.menu.addMenuItem(this._correctionPipelineMenu());
         this.menu.addMenuItem(this._triggerMenu());
         this.menu.addMenuItem(this._timingMenu());
         this.menu.addMenuItem(this._daemonSwitchItem());
@@ -336,6 +406,94 @@ class LayIndicator extends PanelMenu.Button {
             this._attachTooltip(item, tooltip);
         this._toggleButtons[key] = item;
         return item;
+    }
+
+    _arbiterMenu() {
+        const item = new PopupMenu.PopupSubMenuMenuItem('Арбитр', false);
+        item.menu.addMenuItem(this._switchItem(
+            'Авто-layout после пробела',
+            'auto_switch_layout',
+            false,
+            AUTO_SWITCH_TOOLTIP
+        ));
+        item.menu.addMenuItem(this._switchItem(
+            'LEM: 2 слова',
+            'lem_2_words',
+            false,
+            LEM_2_TOOLTIP
+        ));
+        item.menu.addMenuItem(this._switchItem(
+            'LEM: 3 слова',
+            'lem_3_words',
+            false,
+            LEM_3_TOOLTIP
+        ));
+        return item;
+    }
+
+    _correctionPipelineMenu() {
+        const item = new PopupMenu.PopupSubMenuMenuItem('Коррекция', false);
+        for (const [idx, rule] of this._cfg.typing_assist_pipeline.entries())
+            item.menu.addMenuItem(this._pipelineRuleRow(rule, idx));
+        return item;
+    }
+
+    _pipelineRuleRow(rule, idx) {
+        const item = new PopupMenu.PopupSwitchMenuItem(
+            `${idx + 1}. ${typingRuleLabel(rule.id)}`,
+            rule.enabled,
+            {}
+        );
+        item.connect('toggled', (_item, state) => {
+            this._setTypingRuleEnabled(rule.id, state);
+        });
+        item.add_child(this._smallOrderButton('↑', () => this._moveTypingRule(rule.id, -1)));
+        item.add_child(this._smallOrderButton('↓', () => this._moveTypingRule(rule.id, 1)));
+        return item;
+    }
+
+    _smallOrderButton(label, onClick) {
+        const button = new St.Button({
+            label,
+            reactive: true,
+            can_focus: true,
+            style_class: 'button flat',
+            style: 'padding:1px 6px; border-radius:6px; min-width:0;',
+        });
+        button.connect('clicked', () => {
+            onClick();
+            return Clutter.EVENT_STOP;
+        });
+        return button;
+    }
+
+    _setTypingRuleEnabled(id, enabled) {
+        this._cfg.typing_assist_pipeline = normalizeTypingPipeline(
+            this._cfg.typing_assist_pipeline.map(rule =>
+                rule.id === id ? {...rule, enabled} : rule)
+        );
+        this._saveAndRebuildMenu();
+    }
+
+    _moveTypingRule(id, delta) {
+        const rules = normalizeTypingPipeline(this._cfg.typing_assist_pipeline);
+        const idx = rules.findIndex(rule => rule.id === id);
+        const target = Math.max(0, Math.min(rules.length - 1, idx + delta));
+        if (idx < 0 || target === idx)
+            return;
+        const [rule] = rules.splice(idx, 1);
+        rules.splice(target, 0, rule);
+        this._cfg.typing_assist_pipeline = rules.map((item, order) => ({
+            ...item,
+            priority: (order + 1) * 10,
+        }));
+        this._saveAndRebuildMenu();
+    }
+
+    _saveAndRebuildMenu() {
+        saveConfig(this._cfg);
+        this.menu.removeAll();
+        this._buildMenu();
     }
 
     _attachTooltip(actor, text) {
@@ -584,7 +742,7 @@ class LayIndicator extends PanelMenu.Button {
     }
 
     _saveAndRefresh() {
-        this._cfg.replace_words = Math.max(1, Math.min(2, this._cfg.replace_words));
+        this._cfg.replace_words = Math.max(1, Math.min(3, this._cfg.replace_words));
         this._cfg.correction_engine = this._cfg.correction_engine === 'smart' ? 'smart' : 'replay';
         this._cfg.mode = 'simple';
         this._refreshSelections();
@@ -637,7 +795,8 @@ class LayIndicator extends PanelMenu.Button {
 
     _aboutConfigText() {
         const autoSwitch = this._cfg.auto_switch_layout ? 'авто-layout' : 'layout вручную';
-        return `${this._engineLabel()} · ${this._cfg.replace_words} сл. · ${autoSwitch} · ${this._triggerLabel(this._cfg.trigger)}`;
+        const lem = `LEM ${this._cfg.lem_2_words ? '2' : '-'}${this._cfg.lem_3_words ? '/3' : ''}`;
+        return `${this._engineLabel()} · ${this._cfg.replace_words} сл. · ${lem} · ${autoSwitch} · ${this._triggerLabel(this._cfg.trigger)}`;
     }
 
     _aboutStatsText() {

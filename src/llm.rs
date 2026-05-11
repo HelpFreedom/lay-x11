@@ -27,6 +27,42 @@ const RU_HUNSPELL: &str = "/usr/share/hunspell/ru_RU.dic";
 const EN_HUNSPELL: &str = "/usr/share/hunspell/en_US.dic";
 const EN_WORDS: &str = "/usr/share/dict/words";
 const RU_VOWELS: &str = "аеёиоуыэюяАЕЁИОУЫЭЮЯ";
+const COMMON_RUSSIAN_WORDS: &[&str] = &[
+    "а",
+    "в",
+    "и",
+    "к",
+    "о",
+    "с",
+    "у",
+    "я",
+    "не",
+    "на",
+    "по",
+    "за",
+    "для",
+    "это",
+    "как",
+    "что",
+    "где",
+    "или",
+    "если",
+    "тут",
+    "там",
+    "уже",
+    "еще",
+    "ещё",
+    "надо",
+    "можно",
+    "нужно",
+    "очень",
+    "буду",
+    "будешь",
+    "будет",
+    "будем",
+    "будете",
+    "будут",
+];
 const CHOICE_PROMPT_PREFIX: &str = "Choose the normal text, not keyboard-layout garbage.\n\
 A hello B руддщ => A\n\
 A руддщ B hello => B\n\
@@ -767,18 +803,30 @@ fn is_known_ru_word(word: &str) -> bool {
             return false;
         };
         stem.chars().count() >= 3 && ru_dictionary().contains(stem)
-    })
+    }) || is_known_ru_verb_form(word)
+}
+
+fn is_known_ru_verb_form(word: &str) -> bool {
+    for (ending, lemmas) in [("айте", &["ать"][..]), ("ай", &["ать"][..])] {
+        let Some(stem) = word.strip_suffix(ending) else {
+            continue;
+        };
+        if stem.chars().count() >= 3
+            && lemmas
+                .iter()
+                .any(|lemma_suffix| ru_dictionary().contains(&format!("{stem}{lemma_suffix}")))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn ru_dictionary() -> &'static HashSet<String> {
     static WORDS: OnceLock<HashSet<String>> = OnceLock::new();
     WORDS.get_or_init(|| {
         let mut words = load_hunspell_words(RU_HUNSPELL, Lang::Ru).unwrap_or_default();
-        words.extend(
-            ["я", "в", "и", "к", "с", "у", "о"]
-                .into_iter()
-                .map(str::to_string),
-        );
+        words.extend(COMMON_RUSSIAN_WORDS.iter().copied().map(str::to_string));
         #[cfg(test)]
         words.extend(
             ["главное", "главная", "дом"]

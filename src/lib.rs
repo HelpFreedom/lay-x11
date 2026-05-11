@@ -2,6 +2,7 @@
 //! и из `bin/lay-daemon` (фоновый daemon на двойной Shift).
 
 pub mod dict;
+pub mod lem;
 pub mod llm;
 pub mod ngram;
 pub mod quality;
