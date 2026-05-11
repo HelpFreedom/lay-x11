@@ -16,12 +16,31 @@ use evdev::{uinput::VirtualDevice, AttributeSet, Device, EventType, InputEvent, 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Runtime-флаг авто-режима. Не сохраняется в config: после перезапуска daemon
+/// (в т.ч. при reboot) сбрасывается в false → возвращается базовый режим.
+/// Переключается жестом Shift→Ctrl→Shift→Shift (см. GestureState ниже).
+/// Когда true — typing_assist, auto_replace и auto_switch_layout включены,
+/// независимо от config.json.
+static AUTO_OVERRIDE: AtomicBool = AtomicBool::new(false);
+
+fn auto_override_enabled() -> bool {
+    AUTO_OVERRIDE.load(Ordering::Relaxed)
+}
+
+fn toggle_auto_override() -> bool {
+    // fetch_xor возвращает прежнее значение; вычисляем новое.
+    let prev = AUTO_OVERRIDE.fetch_xor(true, Ordering::Relaxed);
+    !prev
+}
 
 const CONFIG_PATH: &str = ".config/lay/config.json"; // относительно $HOME
 const REPLACEMENTS_PATH: &str = ".config/lay/replacements.json"; // относительно $HOME
 const PROTECTED_WORDS_PATH: &str = ".config/lay/protected_words.txt"; // относительно $HOME
+const NO_REPLACE_PATH: &str = ".config/lay/no_replace.txt"; // относительно $HOME
 const LEARN_LOG_PATH: &str = ".local/share/lay/corrections.jsonl"; // относительно $HOME
 const LEARN_CANDIDATES_PATH: &str = ".local/share/lay/learning_candidates.json"; // относительно $HOME
 const LEARN_LOG_MAX_BYTES: u64 = 1024 * 1024;
@@ -52,109 +71,13 @@ const NGRAM_VERB_ENDING_MARGIN: f64 = -8.0;
 const NGRAM_HARD_SIGN_MARGIN: f64 = 1.0;
 const NGRAM_MOVED_PREFIX_MARGIN: f64 = 0.5;
 const NGRAM_MOVED_PREFIX_RIGHT_MARGIN: f64 = 5.0;
-const NGRAM_GLUED_SPLIT_MARGIN: f64 = -0.25;
-const LEM_LAYOUT_AUTOSWITCH_MARGIN: f64 = 0.25;
 const LEARNING_FEEDBACK_MAX_AGE_SECS: u64 = 30;
 const MAX_REPLACE_WORDS: usize = 8;
 const RU_ALPHABET: [char; 33] = [
     'а', 'б', 'в', 'г', 'д', 'е', 'ё', 'ж', 'з', 'и', 'й', 'к', 'л', 'м', 'н', 'о', 'п', 'р', 'с',
     'т', 'у', 'ф', 'х', 'ц', 'ч', 'ш', 'щ', 'ъ', 'ы', 'ь', 'э', 'ю', 'я',
 ];
-const COMMON_RUSSIAN_WORDS: &[&str] = &[
-    "а",
-    "в",
-    "и",
-    "к",
-    "о",
-    "с",
-    "у",
-    "я",
-    "не",
-    "на",
-    "по",
-    "за",
-    "для",
-    "это",
-    "как",
-    "что",
-    "где",
-    "или",
-    "если",
-    "тут",
-    "там",
-    "уже",
-    "еще",
-    "ещё",
-    "надо",
-    "можно",
-    "нужно",
-    "очень",
-    "буду",
-    "будешь",
-    "будет",
-    "будем",
-    "будете",
-    "будут",
-];
-static DBUS_CONNECTION: OnceLock<Mutex<Option<zbus::blocking::Connection>>> = OnceLock::new();
-
 // ─── Config ─────────────────────────────────────────────────
-
-const DEFAULT_TYPING_ASSIST_RULES: [(&str, i32); 19] = [
-    ("moved_prefix_pair", 10),
-    ("split_word_pair", 20),
-    ("visual_b", 30),
-    ("personal_phrase", 40),
-    ("personal_token", 50),
-    ("duplicate_layout_prefix", 60),
-    ("layout_technical", 70),
-    ("layout_ru_to_en", 80),
-    ("layout_en_to_ru", 90),
-    ("cyrillic_case", 100),
-    ("hard_sign", 110),
-    ("adjacent_transposition", 120),
-    ("repeated_letter", 130),
-    ("single_letter_substitution", 140),
-    ("verb_ending", 150),
-    ("vowel_confusion", 160),
-    ("extra_letters", 170),
-    ("missing_letter", 180),
-    ("glued_phrase", 190),
-];
-const LAYOUT_ONLY_TYPING_ASSIST_RULES: &[&str] = &[
-    "duplicate_layout_prefix",
-    "layout_technical",
-    "layout_ru_to_en",
-    "layout_en_to_ru",
-];
-const COMMON_SHORT_ENGLISH_LAYOUT_WORDS: &[&str] = &[
-    "api", "css", "cpu", "eng", "git", "gpu", "json", "llm", "md", "pdf", "ram", "rus", "sql",
-    "ssd", "ssh", "usb", "zip",
-];
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct TypingAssistRuleConfig {
-    id: String,
-    #[serde(default = "default_rule_enabled")]
-    enabled: bool,
-    #[serde(default)]
-    priority: i32,
-}
-
-fn default_rule_enabled() -> bool {
-    true
-}
-
-fn default_typing_assist_pipeline() -> Vec<TypingAssistRuleConfig> {
-    DEFAULT_TYPING_ASSIST_RULES
-        .iter()
-        .map(|(id, priority)| TypingAssistRuleConfig {
-            id: (*id).to_string(),
-            enabled: true,
-            priority: *priority,
-        })
-        .collect()
-}
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default)]
@@ -163,8 +86,6 @@ struct LayConfig {
     mode: String,
     /// Engine for double-Shift correction: replay | smart.
     correction_engine: Option<String>,
-    /// Layout backend: auto | gnome | kde | x11.
-    layout_backend: String,
     /// Триггер: double-* | caps-lock | single-*
     trigger: String,
     /// Максимальная длительность каждого тапа (мс)
@@ -173,7 +94,7 @@ struct LayConfig {
     shift_window_ms: u64,
     /// Дебаунс после конвертации (мс)
     debounce_ms: u64,
-    /// Сколько последних слов менять: 1..3 независимо от engine.
+    /// Сколько последних слов менять: 1..2 независимо от engine.
     replace_words: usize,
     /// Точные персональные автоподмены после обычной перекладки.
     auto_replace: bool,
@@ -181,13 +102,6 @@ struct LayConfig {
     typing_assist: bool,
     /// После автоматической помощи при наборе оставлять активной раскладку результата.
     auto_switch_layout: bool,
-    /// Использовать LEM-арбитр для smart-хвоста из двух слов.
-    lem_2_words: bool,
-    /// Использовать LEM-арбитр для smart-хвоста из трех и более слов.
-    lem_3_words: bool,
-    /// Конвейер правил помощи при наборе: id + enabled + priority.
-    #[serde(default = "default_typing_assist_pipeline")]
-    typing_assist_pipeline: Vec<TypingAssistRuleConfig>,
     /// Локальный opt-in лог исправлений для будущего обучения.
     learning_log: bool,
 }
@@ -197,7 +111,6 @@ impl Default for LayConfig {
         Self {
             mode: "simple".into(),
             correction_engine: None,
-            layout_backend: "auto".into(),
             trigger: "double-lshift".into(),
             tap_max_ms: 200,
             shift_window_ms: 250,
@@ -206,9 +119,6 @@ impl Default for LayConfig {
             auto_replace: false,
             typing_assist: false,
             auto_switch_layout: true,
-            lem_2_words: true,
-            lem_3_words: true,
-            typing_assist_pipeline: default_typing_assist_pipeline(),
             learning_log: false,
         }
     }
@@ -228,7 +138,7 @@ impl LayConfig {
     }
 
     fn active_replace_words(&self) -> usize {
-        self.replace_words.clamp(1, 3)
+        self.replace_words.clamp(1, 2)
     }
 
     fn active_correction_engine(&self) -> CorrectionEngine {
@@ -240,57 +150,6 @@ impl LayConfig {
             _ => CorrectionEngine::Replay,
         }
     }
-
-    fn active_layout_backend(&self) -> LayoutBackend {
-        resolve_layout_backend(
-            &self.layout_backend,
-            std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
-            std::env::var("DESKTOP_SESSION").ok().as_deref(),
-            std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
-        )
-    }
-
-    fn active_typing_assist_pipeline(&self) -> Vec<TypingAssistRuleConfig> {
-        normalize_typing_assist_pipeline(&self.typing_assist_pipeline)
-    }
-
-    fn lem_enabled_for_scope(&self, word_count: usize) -> bool {
-        match word_count {
-            0 | 1 => false,
-            2 => self.lem_2_words,
-            _ => self.lem_3_words,
-        }
-    }
-}
-
-fn normalize_typing_assist_pipeline(
-    configured: &[TypingAssistRuleConfig],
-) -> Vec<TypingAssistRuleConfig> {
-    let mut rules = default_typing_assist_pipeline();
-    for saved in configured {
-        if let Some(rule) = rules.iter_mut().find(|rule| rule.id == saved.id) {
-            rule.enabled = saved.enabled;
-            if saved.priority > 0 {
-                rule.priority = saved.priority;
-            }
-        }
-    }
-    rules.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.id.cmp(&b.id)));
-    rules
-}
-
-fn typing_assist_pipeline_for_auto_replace(
-    auto_replace: bool,
-    configured: &[TypingAssistRuleConfig],
-) -> Vec<TypingAssistRuleConfig> {
-    let mut rules = normalize_typing_assist_pipeline(configured);
-    if !auto_replace {
-        for rule in &mut rules {
-            rule.enabled =
-                rule.enabled && LAYOUT_ONLY_TYPING_ASSIST_RULES.contains(&rule.id.as_str());
-        }
-    }
-    rules
 }
 
 fn active_replace_words() -> usize {
@@ -301,44 +160,30 @@ fn active_correction_engine() -> CorrectionEngine {
     LayConfig::load().active_correction_engine()
 }
 
-fn active_layout_backend() -> LayoutBackend {
-    LayConfig::load().active_layout_backend()
-}
+// Три «авто»-режима управляются жестом Shift→Ctrl→Shift→Shift в памяти, а не
+// через config. По умолчанию все три выключены; жест включает все три сразу.
+// Reboot/перезапуск daemon → сброс в выключенное состояние.
 
 fn active_auto_replace() -> bool {
-    LayConfig::load().auto_replace
+    auto_override_enabled()
 }
 
 fn active_typing_assist() -> bool {
-    LayConfig::load().typing_assist
+    auto_override_enabled()
 }
 
 fn active_auto_switch_layout() -> bool {
-    LayConfig::load().auto_switch_layout
+    auto_override_enabled()
 }
 
 fn active_learning_log() -> bool {
     LayConfig::load().learning_log
 }
 
-fn active_lem_enabled_for_scope(word_count: usize) -> bool {
-    LayConfig::load().lem_enabled_for_scope(word_count)
-}
-
-#[cfg(not(test))]
-fn active_typing_assist_pipeline() -> Vec<TypingAssistRuleConfig> {
-    LayConfig::load().active_typing_assist_pipeline()
-}
-
-#[cfg(not(test))]
-fn active_typing_assist_pipeline_for_auto_replace() -> Vec<TypingAssistRuleConfig> {
-    let cfg = LayConfig::load();
-    typing_assist_pipeline_for_auto_replace(cfg.auto_replace, &cfg.typing_assist_pipeline)
-}
-
-const DBUS_PATH: &str = "/io/github/radislabus_star/LayDaemon";
-const DBUS_INTERFACE: &str = "io.github.radislabus_star.LayDaemon";
-const DBUS_DEST: &str = "org.gnome.Shell";
+/// XKB-номера групп для US/RU раскладок. Дефолтное соответствие подходит для
+/// `setxkbmap -layout us,ru` (порядок при настройке системы).
+const X11_GROUP_US: u8 = 0;
+const X11_GROUP_RU: u8 = 1;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -380,54 +225,6 @@ impl Drop for ExecutingGuard<'_> {
 enum CorrectionEngine {
     Replay,
     Smart,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LayoutBackend {
-    Gnome,
-    Kde,
-    X11,
-}
-
-impl LayoutBackend {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Gnome => "gnome",
-            Self::Kde => "kde",
-            Self::X11 => "x11",
-        }
-    }
-}
-
-fn resolve_layout_backend(
-    configured: &str,
-    desktop: Option<&str>,
-    session: Option<&str>,
-    session_type: Option<&str>,
-) -> LayoutBackend {
-    match configured.trim().to_ascii_lowercase().as_str() {
-        "gnome" => return LayoutBackend::Gnome,
-        "kde" | "plasma" => return LayoutBackend::Kde,
-        "x11" | "xorg" => return LayoutBackend::X11,
-        _ => {}
-    }
-
-    let desktop = format!(
-        "{}:{}",
-        desktop.unwrap_or_default(),
-        session.unwrap_or_default()
-    )
-    .to_ascii_lowercase();
-    if desktop.contains("kde") || desktop.contains("plasma") {
-        return LayoutBackend::Kde;
-    }
-    if desktop.contains("gnome") {
-        return LayoutBackend::Gnome;
-    }
-    if session_type.is_some_and(|value| value.eq_ignore_ascii_case("x11")) {
-        return LayoutBackend::X11;
-    }
-    LayoutBackend::Gnome
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -474,12 +271,6 @@ fn main() -> std::io::Result<()> {
         }
     ));
     let startup_cfg = LayConfig::load();
-    let startup_backend = startup_cfg.active_layout_backend();
-    log(&format!(
-        "► layout backend: {} (config={})",
-        startup_backend.label(),
-        startup_cfg.layout_backend
-    ));
     if !args.detect_only && startup_cfg.active_correction_engine() == CorrectionEngine::Smart {
         std::thread::spawn(|| match lay::llm::warm_up() {
             Ok(()) => log("► smart engine: модель прогрета заранее"),
@@ -487,8 +278,8 @@ fn main() -> std::io::Result<()> {
         });
     }
 
-    // GNOME backend uses the Shell extension for layout activation and TypeText fallback.
-    if !args.detect_only && startup_backend == LayoutBackend::Gnome {
+    // DBus extension для переключения раскладки и TypeText fallback.
+    if !args.detect_only {
         match call_ping() {
             Ok(reply) => {
                 log(&format!("► extension: {reply}"));
@@ -498,8 +289,6 @@ fn main() -> std::io::Result<()> {
                 log("⚠ работаю в detect-only");
             }
         }
-    } else if !args.detect_only {
-        log("► GNOME extension ping skipped for non-GNOME layout backend");
     }
 
     // Virtual keyboard через uinput для re-typing физических кнопок
@@ -555,15 +344,12 @@ fn listen_keyboard(
         device.name().unwrap_or("?")
     ));
     log(&format!(
-        "► config: mode={} backend={} replace_words={} auto_replace={} typing_assist={} auto_switch_layout={} lem2={} lem3={} trigger={} tap={}ms window={}ms debounce={}ms",
+        "► config: mode={} replace_words={} auto_replace={} typing_assist={} auto_switch_layout={} trigger={} tap={}ms window={}ms debounce={}ms",
         cfg.mode,
-        cfg.active_layout_backend().label(),
         cfg.replace_words,
         cfg.auto_replace,
         cfg.typing_assist,
         cfg.auto_switch_layout,
-        cfg.lem_2_words,
-        cfg.lem_3_words,
         cfg.trigger,
         cfg.tap_max_ms,
         cfg.shift_window_ms,
@@ -594,6 +380,19 @@ fn listen_keyboard(
     let shift_tap_max = Duration::from_millis(cfg.tap_max_ms);
     let shift_window = Duration::from_millis(cfg.shift_window_ms);
     let debounce_window = Duration::from_millis(cfg.debounce_ms);
+
+    // ─── Жест Shift→Ctrl→Shift→Shift (переключает AUTO_OVERRIDE) ────────────
+    // 4 тапа подряд, целиком в окне ~3 сек. Тапы — пресс+релиз ≤ tap_max,
+    // без других клавиш между ними. При срабатывании авто-режим toggle'ится,
+    // и заодно подавляется ложный double-shift (4-й Shift замыкает паттерн
+    // press→release→press→release для основной FSM).
+    let mut gesture_state = GestureState::Idle;
+    let mut gesture_lshift_pressed_at: Option<Instant> = None;
+    let mut gesture_lctrl_pressed_at: Option<Instant> = None;
+    let mut gesture_last_event_at: Option<Instant> = None;
+    let gesture_tap_max = Duration::from_millis(500); // удержание ≤ полусекунды
+    let gesture_step_window = Duration::from_millis(1000); // между соседними тапами
+    let gesture_total_window = Duration::from_millis(3000); // от 1-го тапа до конца
     let mut current_layout_is_ru = read_current_layout_is_ru().unwrap_or(false);
     let mut last_layout_poll = Instant::now();
     let mut last_double_at: Option<Instant> = None;
@@ -631,6 +430,39 @@ fn listen_keyboard(
 
             // ─── modifier tracking ────────────────────────────
             shift_state.update(key, value);
+
+            // ═══ Жест Shift→Ctrl→Shift→Shift (toggle авто-режима) ═══════
+            let gesture_before = gesture_state;
+            let gesture_fired = update_gesture_fsm(
+                key,
+                value,
+                gesture_tap_max,
+                gesture_step_window,
+                gesture_total_window,
+                &mut gesture_state,
+                &mut gesture_lshift_pressed_at,
+                &mut gesture_lctrl_pressed_at,
+                &mut gesture_last_event_at,
+            );
+            if gesture_before != gesture_state && value == 0 {
+                log(&format!(
+                    "  gesture: {gesture_before:?} → {gesture_state:?} (key={key:?})"
+                ));
+            }
+            if gesture_fired {
+                let now_on = toggle_auto_override();
+                // Печатаем НЕ через log() (тот гасится без --debug-log),
+                // а напрямую — чтобы видеть переключение в journalctl всегда.
+                eprintln!(
+                    "[lay-daemon] ⚙ AUTO {} (typing_assist + auto_replace + auto_switch_layout)",
+                    if now_on { "ON" } else { "OFF" }
+                );
+                // 4-й Shift release замыкает паттерн dshift FSM → DOUBLE.
+                // Сбрасываем dshift в Idle и пропускаем остаток обработки
+                // этого события, чтобы не выполнить нежелательную перекладку.
+                dshift_state = DShiftState::Idle;
+                continue;
+            }
 
             // ═══ FSM: press→release→press→release = DOUBLE TRIGGER ════
             // RShift и RAlt не участвуют в FSM
@@ -1044,6 +876,132 @@ enum DShiftState {
     },
 }
 
+/// FSM жеста Shift→Ctrl→Shift→Shift для переключения авто-режима.
+///
+/// Транзиции по релизу клавиши (тапу). Любая «лишняя» клавиша или таймаут
+/// возвращают в Idle. Финальный тап = 4-й Shift release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GestureState {
+    Idle,
+    AfterShift1, // увидели тап Shift, ждём Ctrl
+    AfterCtrl,   // увидели Shift→Ctrl, ждём Shift
+    AfterShift2, // увидели Shift→Ctrl→Shift, ждём финальный Shift
+}
+
+/// Обработать событие в FSM жеста. Возвращает true, если жест замкнулся
+/// (нужно переключить авто-режим). Сама функция стейт не сбрасывает в Idle
+/// после срабатывания — это делается в логике вызова.
+fn update_gesture_fsm(
+    key: KeyCode,
+    value: i32,
+    tap_max: Duration,
+    step_window: Duration,
+    total_window: Duration,
+    state: &mut GestureState,
+    lshift_pressed_at: &mut Option<Instant>,
+    lctrl_pressed_at: &mut Option<Instant>,
+    last_event_at: &mut Option<Instant>,
+) -> bool {
+    // 2 = autorepeat → игнор, паттерн ломается только если репит другой клавиши.
+    if value == 2 {
+        return false;
+    }
+
+    let now = Instant::now();
+
+    // Отслеживаем press-моменты для LShift и LCtrl.
+    if value == 1 {
+        match key {
+            KeyCode::KEY_LEFTSHIFT => {
+                *lshift_pressed_at = Some(now);
+            }
+            KeyCode::KEY_LEFTCTRL => {
+                *lctrl_pressed_at = Some(now);
+            }
+            _ => {
+                // Любой другой press сбрасывает жест. modifier-press во время
+                // жеста допустим только LShift/LCtrl.
+                *state = GestureState::Idle;
+                *lshift_pressed_at = None;
+                *lctrl_pressed_at = None;
+            }
+        }
+        return false;
+    }
+
+    // value == 0 → release. Только тут продвигаем FSM.
+    let (pressed_at, is_shift) = match key {
+        KeyCode::KEY_LEFTSHIFT => (lshift_pressed_at.take(), true),
+        KeyCode::KEY_LEFTCTRL => (lctrl_pressed_at.take(), false),
+        _ => {
+            // Прочие release-события не сбрасывают (могут быть «хвостами»
+            // от modifier'ов нажатых до начала жеста).
+            return false;
+        }
+    };
+
+    let pressed_at = match pressed_at {
+        Some(t) => t,
+        None => {
+            *state = GestureState::Idle;
+            return false;
+        }
+    };
+    let held = now.duration_since(pressed_at);
+    if held > tap_max {
+        // Удержание → не тап, жест ломается.
+        *state = GestureState::Idle;
+        return false;
+    }
+
+    // Проверка окна между соседними тапами и общего окна с первого тапа.
+    let within_step = match last_event_at {
+        Some(t) => now.duration_since(*t) <= step_window,
+        None => true,
+    };
+    if !within_step {
+        *state = GestureState::Idle;
+        // Но текущий Shift-release может стать «первым» нового жеста.
+    }
+
+    let new_state = match (*state, is_shift) {
+        (GestureState::Idle, true) => Some(GestureState::AfterShift1),
+        (GestureState::AfterShift1, false) => Some(GestureState::AfterCtrl),
+        (GestureState::AfterCtrl, true) => Some(GestureState::AfterShift2),
+        (GestureState::AfterShift2, true) => {
+            // Финальный тап — проверяем что весь жест уложился в total_window.
+            let total_ok = last_event_at
+                .map(|first| now.duration_since(first) <= total_window)
+                .unwrap_or(true);
+            if total_ok {
+                *state = GestureState::Idle;
+                *last_event_at = None;
+                return true;
+            }
+            *state = GestureState::Idle;
+            None
+        }
+        _ => {
+            // Неподходящая последовательность — сброс. Если это Shift release,
+            // он может стать началом нового жеста.
+            if is_shift {
+                Some(GestureState::AfterShift1)
+            } else {
+                *state = GestureState::Idle;
+                None
+            }
+        }
+    };
+
+    if let Some(ns) = new_state {
+        *state = ns;
+        *last_event_at = Some(now);
+    } else {
+        *last_event_at = None;
+    }
+    false
+}
+
 // ─── WordBuffer ─────────────────────────────────────────────
 
 struct WordBuffer {
@@ -1052,18 +1010,7 @@ struct WordBuffer {
     prev_had_trailing_space: bool,
     replay_toggle_ready: bool,
     pending_learning: Option<PendingLearningCorrection>,
-    pending_auto_undo: Option<PendingAutoUndo>,
     last_input: Instant,
-}
-
-#[derive(Debug, Clone)]
-struct PendingAutoUndo {
-    lay_kind: String,
-    original: String,
-    replacement: String,
-    replace_words: usize,
-    words: usize,
-    started_at: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -1097,7 +1044,6 @@ impl WordBuffer {
             prev_had_trailing_space: false,
             replay_toggle_ready: false,
             pending_learning: None,
-            pending_auto_undo: None,
             last_input: Instant::now(),
         }
     }
@@ -1105,7 +1051,6 @@ impl WordBuffer {
         self.current.push(e);
         self.prev_had_trailing_space = false;
         self.replay_toggle_ready = false;
-        self.pending_auto_undo = None;
         self.last_input = Instant::now();
     }
     fn handle_space(&mut self) {
@@ -1123,11 +1068,14 @@ impl WordBuffer {
         self.prev_words.clear();
         self.prev_had_trailing_space = false;
         self.replay_toggle_ready = false;
-        self.pending_auto_undo = None;
         self.last_input = Instant::now();
     }
     fn is_empty(&self) -> bool {
         self.current.is_empty() && self.prev_words.is_empty()
+    }
+
+    fn has_current_word(&self) -> bool {
+        !self.current.is_empty()
     }
 
     fn last_completed_words_events(&self, count: usize) -> Option<Vec<KeyEvent>> {
@@ -1282,19 +1230,9 @@ impl WordBuffer {
 
                 let mut tail = (*word).to_vec();
                 mark_word_layout(&mut tail, target_is_ru);
+                self.current = tail;
                 self.prev_words.clear();
-                if replacement
-                    .chars()
-                    .next_back()
-                    .is_some_and(char::is_whitespace)
-                {
-                    self.current.clear();
-                    self.prev_words.push(tail);
-                    self.prev_had_trailing_space = true;
-                } else {
-                    self.current = tail;
-                    self.prev_had_trailing_space = false;
-                }
+                self.prev_had_trailing_space = false;
                 self.replay_toggle_ready = true;
                 self.last_input = Instant::now();
                 return true;
@@ -1327,37 +1265,6 @@ impl WordBuffer {
             deleted_chars: 0,
             typed: Vec::new(),
         });
-    }
-
-    fn remember_pending_auto_undo(
-        &mut self,
-        lay_kind: &str,
-        original: &str,
-        replacement: &str,
-        replace_words: usize,
-        words: usize,
-    ) {
-        if original == replacement || original.trim().is_empty() || replacement.trim().is_empty() {
-            self.pending_auto_undo = None;
-            return;
-        }
-
-        self.pending_auto_undo = Some(PendingAutoUndo {
-            lay_kind: lay_kind.to_string(),
-            original: original.to_string(),
-            replacement: replacement.to_string(),
-            replace_words,
-            words,
-            started_at: Instant::now(),
-        });
-    }
-
-    fn take_pending_auto_undo(&mut self) -> Option<PendingAutoUndo> {
-        let undo = self.pending_auto_undo.take()?;
-        if undo.started_at.elapsed() > Duration::from_secs(LEARNING_FEEDBACK_MAX_AGE_SECS) {
-            return None;
-        }
-        Some(undo)
     }
 
     fn note_learning_backspace(&mut self) {
@@ -1587,19 +1494,13 @@ fn handle_typing_assist_after_space(
     executing: &mut bool,
 ) {
     let started_at = Instant::now();
-    let allow_layout_auto = active_auto_switch_layout();
-    #[cfg(test)]
-    let pipeline = default_typing_assist_pipeline();
-    #[cfg(not(test))]
-    let pipeline = active_typing_assist_pipeline_for_auto_replace();
     let correction = [2, 1].into_iter().find_map(|word_count| {
         let events = buf.last_completed_words_events(word_count)?;
         let original = map_original_events(&events);
-        let replacement =
-            apply_typing_assist_with_pipeline(&original, allow_layout_auto, &pipeline)?;
-        Some((events, original, replacement))
+        let replacement = apply_typing_assist(&original, active_auto_switch_layout())?;
+        Some((original, replacement))
     });
-    let Some((events, original, replacement)) = correction else {
+    let Some((original, replacement)) = correction else {
         return;
     };
 
@@ -1616,13 +1517,11 @@ fn handle_typing_assist_after_space(
     }
 
     let original_layout = read_current_layout_is_ru().ok();
-    let plan = plan_committed_tail_replacement(&original, &replacement).unwrap_or_else(|| {
-        TextReplacement {
-            move_left: 0,
-            backspaces: original.chars().count() as u32,
-            insert: replacement.clone(),
-            move_right: 0,
-        }
+    let plan = plan_text_replacement(&original, &replacement).unwrap_or_else(|| TextReplacement {
+        move_left: 0,
+        backspaces: original.chars().count() as u32,
+        insert: replacement.clone(),
+        move_right: 0,
     });
 
     if let Err(e) = apply_text_replacement(kbd, &plan) {
@@ -1665,10 +1564,7 @@ fn handle_typing_assist_after_space(
         words,
         words,
     );
-    if !buf.remember_replacement_last_word_for_replay(&events, &plan, &replacement) {
-        buf.reset_all();
-    }
-    buf.remember_pending_auto_undo("typing-assist", &original, &replacement, words, words);
+    buf.reset_all();
     log(&format!(
         "✓ done: помощь при наборе {:?} → {:?} за {}ms",
         original,
@@ -1686,10 +1582,6 @@ fn handle_double_shift(
     executing: &mut bool,
 ) -> Option<bool> {
     let started_at = Instant::now();
-    if let Some(undo) = buf.take_pending_auto_undo() {
-        return handle_pending_auto_undo(buf, undo, virtual_kbd, executing, started_at);
-    }
-
     let replace_words = effective_replace_words(buf, replace_words, engine, auto_replace);
     let Some((events, n_backspaces)) = buf.what_to_replay(replace_words) else {
         log("👆 двойной Shift, но буфер пуст");
@@ -1786,14 +1678,13 @@ fn handle_double_shift(
         if text.trim().is_empty() || text == mapped_target {
             log("  2. text decision совпал с replay — replay для сохранения toggle");
         } else {
-            let plan = plan_committed_tail_replacement(&mapped_orig, &text).unwrap_or_else(|| {
-                TextReplacement {
+            let plan =
+                plan_text_replacement(&mapped_orig, &text).unwrap_or_else(|| TextReplacement {
                     move_left: 0,
                     backspaces: n_backspaces,
                     insert: text.clone(),
                     move_right: 0,
-                }
-            });
+                });
             if let Err(e) = apply_text_replacement(kbd, &plan) {
                 log(&format!("⚠ {kind} minimal replace failed: {e}"));
                 return None;
@@ -1919,70 +1810,6 @@ fn handle_double_shift(
         started_at.elapsed().as_millis()
     ));
     Some(target_is_ru)
-}
-
-fn handle_pending_auto_undo(
-    buf: &mut WordBuffer,
-    undo: PendingAutoUndo,
-    virtual_kbd: Option<&mut VirtualDevice>,
-    executing: &mut bool,
-    started_at: Instant,
-) -> Option<bool> {
-    let Some(kbd) = virtual_kbd else {
-        log("⚠ auto-undo: нет uinput device");
-        return None;
-    };
-
-    *executing = true;
-    let _executing_guard = ExecutingGuard(executing);
-
-    if let Err(e) = release_possible_modifiers(kbd) {
-        log(&format!("⚠ auto-undo modifier cleanup failed: {e}"));
-    }
-
-    let plan = pending_auto_undo_plan(&undo);
-    if let Err(e) = apply_text_replacement(kbd, &plan) {
-        log(&format!("⚠ auto-undo delete failed: {e}"));
-        return None;
-    }
-
-    let target_is_ru = preferred_layout_for_text(&undo.original, true);
-    if let Err(e) = insert_text_via_uinput_or_type_text(kbd, &plan.insert, target_is_ru) {
-        log(&format!("⚠ auto-undo insert failed: {e}"));
-        return None;
-    }
-    match switch_to_target_layout(target_is_ru) {
-        Ok(layout_id) => log(&format!("  auto-undo layout → {layout_id}")),
-        Err(e) => log(&format!("⚠ auto-undo layout switch failed: {e}")),
-    }
-
-    append_user_correction_learning_log(&UserLearningCorrection {
-        lay_kind: undo.lay_kind.clone(),
-        lay_from: undo.original.clone(),
-        lay_to: undo.replacement.clone(),
-        from: undo.replacement.clone(),
-        to: undo.original.clone(),
-        replace_words: undo.replace_words,
-        words: undo.words,
-    });
-    buf.pending_learning = None;
-    buf.reset_all();
-    log(&format!(
-        "✓ done: auto-undo {:?} → {:?} за {}ms",
-        undo.replacement,
-        undo.original,
-        started_at.elapsed().as_millis()
-    ));
-    Some(target_is_ru)
-}
-
-fn pending_auto_undo_plan(undo: &PendingAutoUndo) -> TextReplacement {
-    TextReplacement {
-        move_left: 0,
-        backspaces: undo.replacement.chars().count() as u32,
-        insert: undo.original.clone(),
-        move_right: 0,
-    }
 }
 
 fn replay_keycodes(dev: &mut VirtualDevice, events: &[KeyEvent]) -> std::io::Result<()> {
@@ -2139,84 +1966,8 @@ fn emit_backspaces_for_text_replace(dev: &mut VirtualDevice, n: u32) -> std::io:
     Ok(())
 }
 
-fn switch_ibus_engine(engine: &str) -> Result<(), String> {
-    let out = Command::new("ibus")
-        .args(["engine", engine])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    Ok(())
-}
-
-fn read_ibus_engine() -> Result<String, String> {
-    let out = Command::new("ibus")
-        .arg("engine")
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
 fn read_current_layout_is_ru() -> Result<bool, String> {
-    match active_layout_backend() {
-        LayoutBackend::Gnome => read_current_layout_gnome_is_ru(),
-        LayoutBackend::Kde => read_current_layout_kde_is_ru(),
-        LayoutBackend::X11 => read_current_layout_x11_is_ru(),
-    }
-}
-
-fn read_current_layout_gnome_is_ru() -> Result<bool, String> {
-    call_current_layout()
-        .map(|id| is_ru_layout_id(&id))
-        .or_else(|_| read_ibus_engine().map(|engine| is_ru_layout_id(&engine)))
-}
-
-fn read_current_layout_kde_is_ru() -> Result<bool, String> {
-    let qdbus = find_qdbus_command().ok_or_else(|| "qdbus/qdbus6 not found".to_string())?;
-    let layout = run_command_capture(qdbus, &["org.kde.keyboard", "/Layouts", "getCurrentLayout"])?;
-    Ok(is_ru_layout_id(&layout))
-}
-
-fn read_current_layout_x11_is_ru() -> Result<bool, String> {
-    let layout = read_x11_layout()?;
-    Ok(is_ru_layout_id(&layout))
-}
-
-fn call_list_layouts() -> Result<String, String> {
-    call_dbus_list_layouts().or_else(|fast_error| {
-        reset_dbus_connection();
-        log(&format!(
-            "⚠ DBus fast ListLayouts failed: {fast_error}; fallback gdbus"
-        ));
-        run_gdbus(&format!("{DBUS_INTERFACE}.ListLayouts"), &[])
-    })
-}
-
-fn parse_gdbus_string(reply: &str) -> Option<String> {
-    let trimmed = reply.trim();
-    let without_tuple = trimmed.strip_prefix("('")?.strip_suffix("',)")?;
-    Some(without_tuple.replace("\\'", "'"))
-}
-
-fn parse_gdbus_bool(reply: &str) -> Option<bool> {
-    let trimmed = reply.trim();
-    match trimmed {
-        "(true,)" => Some(true),
-        "(false,)" => Some(false),
-        _ => None,
-    }
-}
-
-fn parse_current_layout_from_list(layouts: &str) -> Option<String> {
-    let list = parse_gdbus_string(layouts).unwrap_or_else(|| layouts.to_string());
-    list.split(',').find_map(|entry| {
-        let current = entry.strip_suffix('*')?;
-        current.rsplit(':').next().map(str::to_string)
-    })
+    call_current_layout().map(|id| id == "ru")
 }
 
 /// Преобразует keycode + shift в RU-символ (йцукен раскладка).
@@ -2608,91 +2359,34 @@ fn make_virtual_keyboard() -> std::io::Result<VirtualDevice> {
         .build()
 }
 
-// ─── DBus и ibus ────────────────────────────────────────────
+// ─── X11 XKB и эмуляция ввода ───────────────────────────────
+//
+// На X11 переключение раскладки делается синхронно через XkbLockGroup —
+// fallback'ов и retry не нужно. Слой DBus к GNOME Shell, ibus и gdbus здесь
+// полностью отсутствует. API функций совпадает с оригинальной версией,
+// чтобы остальной код daemon работал без изменений.
 
 fn call_ping() -> Result<String, String> {
-    call_dbus_ping().or_else(|fast_error| {
-        reset_dbus_connection();
-        log(&format!(
-            "⚠ DBus fast Ping failed: {fast_error}; fallback gdbus"
-        ));
-        let reply = run_gdbus(&format!("{DBUS_INTERFACE}.Ping"), &[])?;
-        parse_gdbus_string(&reply).ok_or_else(|| format!("не распарсил Ping: {reply}"))
-    })
+    lay::x11_layout::ping()
 }
 
 fn call_activate_layout(id: &str) -> Result<bool, String> {
-    call_dbus_activate_layout(id).or_else(|fast_error| {
-        reset_dbus_connection();
-        log(&format!(
-            "⚠ DBus fast ActivateLayout failed: {fast_error}; fallback gdbus"
-        ));
-        let reply = run_gdbus(
-            &format!("{DBUS_INTERFACE}.ActivateLayout"),
-            &[&format!("\"{id}\"")],
-        )?;
-        parse_gdbus_bool(&reply).ok_or_else(|| format!("не распарсил ActivateLayout: {reply}"))
-    })
+    let group = match id {
+        "us" => X11_GROUP_US,
+        "ru" => X11_GROUP_RU,
+        other => return Err(format!("unknown layout id: {other}")),
+    };
+    lay::x11_layout::lock_group(group).map(|()| true)
 }
 
-fn switch_to_layout(layout_id: &str, ibus_engine: &str, target_is_ru: bool) -> Result<(), String> {
-    match active_layout_backend() {
-        LayoutBackend::Gnome => switch_to_gnome_layout(layout_id, ibus_engine, target_is_ru),
-        LayoutBackend::Kde => switch_to_kde_layout(layout_id, target_is_ru),
-        LayoutBackend::X11 => switch_to_x11_layout(layout_id, target_is_ru),
-    }
-}
-
-fn switch_to_gnome_layout(
-    layout_id: &str,
-    ibus_engine: &str,
-    target_is_ru: bool,
-) -> Result<(), String> {
+fn switch_to_layout(layout_id: &str, _ibus_engine: &str, target_is_ru: bool) -> Result<(), String> {
     if !call_activate_layout(layout_id)? {
-        return Err("ActivateLayout returned false".to_string());
+        return Err("activate layout failed".to_string());
     }
-
-    let ibus_error = switch_ibus_engine(ibus_engine).err();
     if verify_current_layout(target_is_ru) {
-        if let Some(error) = ibus_error {
-            log(&format!(
-                "⚠ SetGlobalEngine failed, GNOME layout verified: {error}"
-            ));
-        }
         return Ok(());
     }
-
-    Err(match ibus_error {
-        Some(error) => format!("SetGlobalEngine failed: {error}; layout verify failed"),
-        None => "layout verify failed".to_string(),
-    })
-}
-
-fn switch_to_kde_layout(layout_id: &str, target_is_ru: bool) -> Result<(), String> {
-    let qdbus = find_qdbus_command().ok_or_else(|| "qdbus/qdbus6 not found".to_string())?;
-    run_command_capture(
-        qdbus,
-        &["org.kde.keyboard", "/Layouts", "setLayout", layout_id],
-    )?;
-    if verify_current_layout(target_is_ru) {
-        Ok(())
-    } else {
-        Err("KDE layout verify failed".to_string())
-    }
-}
-
-fn switch_to_x11_layout(layout_id: &str, target_is_ru: bool) -> Result<(), String> {
-    if command_exists("xkb-switch") {
-        run_command_capture("xkb-switch", &["-s", layout_id])?;
-    } else {
-        run_command_capture("setxkbmap", &[layout_id])?;
-    }
-
-    if verify_current_layout(target_is_ru) {
-        Ok(())
-    } else {
-        Err("X11 layout verify failed".to_string())
-    }
+    Err("layout verify failed".to_string())
 }
 
 fn switch_to_target_layout(target_is_ru: bool) -> Result<&'static str, String> {
@@ -2709,237 +2403,42 @@ fn target_layout(target_is_ru: bool) -> (&'static str, &'static str) {
 }
 
 fn verify_current_layout(target_is_ru: bool) -> bool {
+    // На X11 XkbLockGroup синхронный — проверка обычно проходит с первого раза.
+    // Оставляем короткий retry на случай гонок с другими XKB-клиентами.
     for _ in 0..5 {
         if read_current_layout_is_ru().is_ok_and(|current| current == target_is_ru) {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(5));
     }
     false
 }
 
+/// На X11 TypeText используется только как fallback, когда uinput-replay
+/// невозможен. Пробуем xdotool — если не установлен, возвращаем ошибку и
+/// вызвавший код просто залогирует её.
 fn call_type_text(text: &str) -> Result<String, String> {
-    if active_layout_backend() != LayoutBackend::Gnome {
-        return Err("TypeText fallback is available only through the GNOME backend".to_string());
-    }
-    call_dbus_type_text(text).or_else(|fast_error| {
-        reset_dbus_connection();
-        log(&format!(
-            "⚠ DBus fast TypeText failed: {fast_error}; fallback gdbus"
-        ));
-        call_type_text_gdbus(text)
-    })
-}
-
-fn call_type_text_gdbus(text: &str) -> Result<String, String> {
-    let arg = gvariant_string(text);
-    run_gdbus(&format!("{DBUS_INTERFACE}.TypeText"), &[&arg])
-}
-
-fn dbus_connection() -> Result<zbus::blocking::Connection, String> {
-    let cell = DBUS_CONNECTION.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().map_err(|e| e.to_string())?;
-    if let Some(conn) = guard.as_ref() {
-        return Ok(conn.clone());
-    }
-
-    let conn = zbus::blocking::Connection::session().map_err(|e| e.to_string())?;
-    *guard = Some(conn.clone());
-    Ok(conn)
-}
-
-fn reset_dbus_connection() {
-    if let Some(cell) = DBUS_CONNECTION.get() {
-        if let Ok(mut guard) = cell.lock() {
-            *guard = None;
-        }
-    }
-}
-
-fn call_dbus_ping() -> Result<String, String> {
-    let reply = dbus_connection()?
-        .call_method(
-            Some(DBUS_DEST),
-            DBUS_PATH,
-            Some(DBUS_INTERFACE),
-            "Ping",
-            &(),
-        )
-        .map_err(|e| e.to_string())?;
-    reply
-        .body()
-        .deserialize::<String>()
-        .map_err(|e| e.to_string())
-}
-
-fn call_dbus_type_text(text: &str) -> Result<String, String> {
-    dbus_connection()?
-        .call_method(
-            Some(DBUS_DEST),
-            DBUS_PATH,
-            Some(DBUS_INTERFACE),
-            "TypeText",
-            &text,
-        )
-        .map_err(|e| e.to_string())?;
-    Ok(String::new())
-}
-
-fn call_dbus_activate_layout(id: &str) -> Result<bool, String> {
-    let reply = dbus_connection()?
-        .call_method(
-            Some(DBUS_DEST),
-            DBUS_PATH,
-            Some(DBUS_INTERFACE),
-            "ActivateLayout",
-            &id,
-        )
-        .map_err(|e| e.to_string())?;
-    reply
-        .body()
-        .deserialize::<bool>()
-        .map_err(|e| e.to_string())
-}
-
-fn call_current_layout() -> Result<String, String> {
-    call_dbus_current_layout().or_else(|fast_error| {
-        reset_dbus_connection();
-        log(&format!(
-            "⚠ DBus fast CurrentLayout failed: {fast_error}; fallback gdbus"
-        ));
-        let current = run_gdbus(&format!("{DBUS_INTERFACE}.CurrentLayout"), &[]);
-        match current {
-            Ok(reply) => parse_gdbus_string(&reply).ok_or_else(|| format!("не распарсил: {reply}")),
-            Err(current_error) => {
-                let layouts = call_list_layouts()
-                    .map_err(|list_error| format!("{current_error}; ListLayouts: {list_error}"))?;
-                parse_current_layout_from_list(&layouts)
-                    .ok_or_else(|| format!("не нашёл текущую раскладку: {layouts}"))
-            }
-        }
-    })
-}
-
-fn call_dbus_current_layout() -> Result<String, String> {
-    let reply = dbus_connection()?
-        .call_method(
-            Some(DBUS_DEST),
-            DBUS_PATH,
-            Some(DBUS_INTERFACE),
-            "CurrentLayout",
-            &(),
-        )
-        .map_err(|e| e.to_string())?;
-    reply
-        .body()
-        .deserialize::<String>()
-        .map_err(|e| e.to_string())
-}
-
-fn call_dbus_list_layouts() -> Result<String, String> {
-    let reply = dbus_connection()?
-        .call_method(
-            Some(DBUS_DEST),
-            DBUS_PATH,
-            Some(DBUS_INTERFACE),
-            "ListLayouts",
-            &(),
-        )
-        .map_err(|e| e.to_string())?;
-    reply
-        .body()
-        .deserialize::<String>()
-        .map_err(|e| e.to_string())
-}
-
-fn gvariant_string(text: &str) -> String {
-    format!("{text:?}")
-}
-
-fn run_gdbus(method: &str, args: &[&str]) -> Result<String, String> {
-    let mut cmd_args = vec![
-        "call",
-        "--session",
-        "--dest",
-        DBUS_DEST,
-        "--object-path",
-        DBUS_PATH,
-        "--method",
-        method,
-    ];
-    cmd_args.extend(args);
-    let out = Command::new("gdbus")
-        .args(&cmd_args)
+    let out = Command::new("xdotool")
+        .arg("type")
+        .arg("--delay")
+        .arg("1")
+        .arg("--")
+        .arg(text)
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("xdotool spawn: {e} (установи: apt install xdotool)"))?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Ok(String::new())
 }
 
-fn run_command_capture(command: &str, args: &[&str]) -> Result<String, String> {
-    let out = Command::new(command)
-        .args(args)
-        .output()
-        .map_err(|e| format!("{command}: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "{command}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+fn call_current_layout() -> Result<String, String> {
+    let group = lay::x11_layout::current_group()?;
+    match group {
+        g if g == X11_GROUP_US => Ok("us".to_string()),
+        g if g == X11_GROUP_RU => Ok("ru".to_string()),
+        other => Err(format!("неожиданная XKB group {other}")),
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-fn command_exists(command: &str) -> bool {
-    let Some(paths) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&paths).any(|dir| dir.join(command).is_file())
-}
-
-fn find_qdbus_command() -> Option<&'static str> {
-    ["qdbus6", "qdbus-qt6", "qdbus"]
-        .into_iter()
-        .find(|cmd| command_exists(cmd))
-}
-
-fn read_x11_layout() -> Result<String, String> {
-    if command_exists("xkb-switch") {
-        return run_command_capture("xkb-switch", &[]).map(|layout| normalize_layout_id(&layout));
-    }
-    if command_exists("xkblayout-state") {
-        return run_command_capture("xkblayout-state", &["print", "%s"])
-            .map(|layout| normalize_layout_id(&layout));
-    }
-
-    let query = run_command_capture("setxkbmap", &["-query"])?;
-    parse_setxkbmap_layout(&query).ok_or_else(|| format!("cannot parse setxkbmap output: {query}"))
-}
-
-fn parse_setxkbmap_layout(output: &str) -> Option<String> {
-    output.lines().find_map(|line| {
-        let (key, value) = line.split_once(':')?;
-        (key.trim() == "layout")
-            .then(|| normalize_layout_id(value.split(',').next().unwrap_or(value)))
-    })
-}
-
-fn normalize_layout_id(layout: &str) -> String {
-    let trimmed = layout.trim();
-    if let Some(rest) = trimmed.strip_prefix("xkb:") {
-        return rest.split(':').next().unwrap_or("").to_ascii_lowercase();
-    }
-    trimmed
-        .split([':', ' ', '\t', '\n'])
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase()
-}
-
-fn is_ru_layout_id(layout: &str) -> bool {
-    normalize_layout_id(layout) == "ru"
 }
 
 // ─── Поиск устройства клавиатуры ────────────────────────────
@@ -3104,40 +2603,42 @@ fn apply_auto_replace(original: &str, target: &str) -> Option<String> {
 
 #[cfg(test)]
 fn apply_typing_assist_exact(text: &str) -> Option<String> {
-    apply_typing_assist_with_pipeline(text, false, &default_typing_assist_pipeline())
+    apply_typing_assist(text, false)
 }
 
 fn apply_typing_assist(text: &str, allow_layout_auto: bool) -> Option<String> {
-    #[cfg(test)]
-    let pipeline = default_typing_assist_pipeline();
-    #[cfg(not(test))]
-    let pipeline = active_typing_assist_pipeline();
-
-    apply_typing_assist_with_pipeline(text, allow_layout_auto, &pipeline)
-}
-
-fn apply_typing_assist_with_pipeline(
-    text: &str,
-    allow_layout_auto: bool,
-    pipeline: &[TypingAssistRuleConfig],
-) -> Option<String> {
     let (leading, core, trailing) = split_edge_whitespace(text);
     if core.is_empty() {
         return None;
     }
 
-    let (token_leading, word, token_trailing) = split_word_punctuation(core);
-    let rules = normalize_typing_assist_pipeline(pipeline);
-    let replacement = rules.iter().filter(|rule| rule.enabled).find_map(|rule| {
-        apply_typing_assist_rule(
-            &rule.id,
-            core,
-            word,
-            token_leading,
-            token_trailing,
-            allow_layout_auto,
-        )
-    })?;
+    let replacement = correct_moved_prefix_letter_pair(core)
+        .or_else(|| correct_split_word_pair(core))
+        .or_else(|| replacement_for_token(core))
+        .or_else(|| {
+            let (token_leading, word, token_trailing) = split_word_punctuation(core);
+            if word.is_empty() {
+                return None;
+            }
+            replacement_for_token(word)
+                .or_else(|| correct_duplicate_layout_prefix_on_ascii_token(word))
+                .or_else(|| correct_wrong_layout_ascii_technical_token(word))
+                .or_else(|| {
+                    allow_layout_auto
+                        .then(|| correct_wrong_layout_ascii_word(word))
+                        .flatten()
+                })
+                .or_else(|| correct_cyrillic_word_case(word))
+                .or_else(|| correct_hard_sign_typo(word))
+                .or_else(|| correct_adjacent_transposition(word))
+                .or_else(|| correct_repeated_letter(word))
+                .or_else(|| correct_single_letter_substitution(word))
+                .or_else(|| correct_verb_ending_confusion(word))
+                .or_else(|| correct_vowel_confusion(word))
+                .or_else(|| correct_extra_letters(word))
+                .or_else(|| correct_missing_letter(word))
+                .map(|replacement| format!("{token_leading}{replacement}{token_trailing}"))
+        })?;
 
     let mut out = String::with_capacity(text.len().max(replacement.len()));
     out.push_str(leading);
@@ -3146,109 +2647,12 @@ fn apply_typing_assist_with_pipeline(
     (out != text).then_some(out)
 }
 
-fn apply_typing_assist_rule(
-    id: &str,
-    core: &str,
-    word: &str,
-    token_leading: &str,
-    token_trailing: &str,
-    allow_layout_auto: bool,
-) -> Option<String> {
-    match id {
-        "moved_prefix_pair" => correct_moved_prefix_letter_pair(core),
-        "split_word_pair" => correct_split_word_pair(core),
-        "visual_b" => replace_visual_b_words(core, core),
-        "personal_phrase" => replacement_for_token(core),
-        "personal_token" => word_rule(word, token_leading, token_trailing, replacement_for_token),
-        "duplicate_layout_prefix" => word_rule(
-            word,
-            token_leading,
-            token_trailing,
-            correct_duplicate_layout_prefix_on_ascii_token,
-        ),
-        "layout_technical" => word_rule(
-            word,
-            token_leading,
-            token_trailing,
-            correct_wrong_layout_ascii_technical_token,
-        ),
-        "layout_ru_to_en" if allow_layout_auto => word_rule(
-            word,
-            token_leading,
-            token_trailing,
-            correct_wrong_layout_cyrillic_word,
-        ),
-        "layout_en_to_ru" if allow_layout_auto => {
-            if let Some(replacement) = correct_wrong_layout_ascii_word(core) {
-                Some(replacement)
-            } else if ascii_layout_prefix_can_be_letter(token_leading) {
-                None
-            } else {
-                word_rule(
-                    word,
-                    token_leading,
-                    token_trailing,
-                    correct_wrong_layout_ascii_word,
-                )
-            }
-        }
-        "cyrillic_case" => word_rule(
-            word,
-            token_leading,
-            token_trailing,
-            correct_cyrillic_word_case,
-        ),
-        "hard_sign" => word_rule(word, token_leading, token_trailing, correct_hard_sign_typo),
-        "adjacent_transposition" => word_rule(
-            word,
-            token_leading,
-            token_trailing,
-            correct_adjacent_transposition,
-        ),
-        "repeated_letter" => {
-            word_rule(word, token_leading, token_trailing, correct_repeated_letter)
-        }
-        "single_letter_substitution" => word_rule(
-            word,
-            token_leading,
-            token_trailing,
-            correct_single_letter_substitution,
-        ),
-        "verb_ending" => word_rule(
-            word,
-            token_leading,
-            token_trailing,
-            correct_verb_ending_confusion,
-        ),
-        "vowel_confusion" => {
-            word_rule(word, token_leading, token_trailing, correct_vowel_confusion)
-        }
-        "extra_letters" => word_rule(word, token_leading, token_trailing, correct_extra_letters),
-        "missing_letter" => word_rule(word, token_leading, token_trailing, correct_missing_letter),
-        "glued_phrase" => word_rule(
-            word,
-            token_leading,
-            token_trailing,
-            correct_glued_russian_phrase,
-        ),
-        _ => None,
-    }
-}
-
-fn word_rule(
-    word: &str,
-    token_leading: &str,
-    token_trailing: &str,
-    f: fn(&str) -> Option<String>,
-) -> Option<String> {
-    if word.is_empty() {
-        return None;
-    }
-    f(word).map(|replacement| format!("{token_leading}{replacement}{token_trailing}"))
-}
-
 fn correct_wrong_layout_ascii_word(token: &str) -> Option<String> {
     if !is_plain_ascii_layout_token(token) || is_protected_ascii_layout_token(token) {
+        return None;
+    }
+    // Команды терминала и алиасы — никогда не переключаем раскладку.
+    if is_no_replace_token(token) {
         return None;
     }
 
@@ -3268,75 +2672,6 @@ fn correct_wrong_layout_ascii_word(token: &str) -> Option<String> {
             .then(|| apply_word_case(token, &converted_lower)),
         _ => Some(apply_word_case(token, &converted_lower)),
     }
-}
-
-fn ascii_layout_prefix_can_be_letter(prefix: &str) -> bool {
-    prefix
-        .chars()
-        .any(|ch| matches!(ch, '\'' | ';' | '[' | ']' | '`' | ',' | '.'))
-}
-
-fn correct_wrong_layout_cyrillic_word(token: &str) -> Option<String> {
-    if !is_plain_cyrillic_layout_token(token) {
-        return None;
-    }
-
-    let original_lower = token.to_lowercase();
-    if is_known_russian_layout_autoswitch_word(&original_lower) {
-        return None;
-    }
-
-    let converted = lay::dict::convert(token, lay::dict::Direction::Ru2Us);
-    if converted == token || !is_plain_ascii_word_candidate(&converted) {
-        return None;
-    }
-
-    english_layout_autoswitch_candidates(&converted)
-        .into_iter()
-        .find_map(|candidate_lower| {
-            let candidate = apply_word_case(token, &candidate_lower);
-            lem_prefers_layout_candidate(token, &candidate).then_some(candidate)
-        })
-}
-
-fn english_layout_autoswitch_candidates(converted: &str) -> Vec<String> {
-    let lower = converted.to_ascii_lowercase();
-    let mut out = Vec::new();
-    if is_known_english_layout_autoswitch_word(&lower) {
-        out.push(lower.clone());
-    }
-
-    let chars: Vec<char> = lower.chars().collect();
-    if chars.len() >= 6 {
-        let without_prefix: String = chars[1..].iter().collect();
-        if !is_known_english_layout_autoswitch_word(&lower)
-            && is_known_english_layout_autoswitch_word(&without_prefix)
-        {
-            out.push(without_prefix);
-        }
-    }
-
-    out
-}
-
-fn lem_prefers_layout_candidate(typed: &str, candidate: &str) -> bool {
-    let ranked = lay::lem::rank_candidates(typed, [typed.to_string(), candidate.to_string()]);
-    let Some(best) = ranked.first() else {
-        return false;
-    };
-    if best.text != candidate {
-        return false;
-    }
-
-    let margin = ranked
-        .get(1)
-        .map(|second| best.total - second.total)
-        .unwrap_or(f64::INFINITY);
-    margin >= LEM_LAYOUT_AUTOSWITCH_MARGIN
-}
-
-fn is_plain_cyrillic_layout_token(token: &str) -> bool {
-    token.chars().any(is_cyrillic_letter) && token.chars().all(is_cyrillic_letter)
 }
 
 fn is_plain_ascii_layout_token(token: &str) -> bool {
@@ -3386,29 +2721,14 @@ fn is_known_russian_layout_autoswitch_word(word: &str) -> bool {
         return russian_tiny_dictionary().contains(word);
     }
 
-    is_known_russian_word_or_form(word)
-        || is_known_russian_adverb_o_form(word)
-        || is_known_russian_ka_oblique_form(word)
-        || russian_short_dictionary().contains(word)
-}
-
-fn is_known_english_layout_autoswitch_word(word: &str) -> bool {
-    let len = word.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
-    if len < 4 {
-        return COMMON_SHORT_ENGLISH_LAYOUT_WORDS.contains(&word);
-    }
-    english_dictionary().contains(word)
-}
-
-fn is_plain_ascii_word_candidate(token: &str) -> bool {
-    token.is_ascii()
-        && token.chars().any(|ch| ch.is_ascii_alphabetic())
-        && token
-            .chars()
-            .all(|ch| ch.is_ascii_alphabetic() || ch == '-')
+    is_known_russian_word_or_form(word) || russian_short_dictionary().contains(word)
 }
 
 fn replacement_for_token(token: &str) -> Option<String> {
+    // Команды терминала и алиасы — никогда не заменяем по словарю.
+    if is_no_replace_token(token) {
+        return None;
+    }
     if let Some(replacement) = promoted_replacement_for_token(token) {
         return Some(replacement);
     }
@@ -3497,134 +2817,19 @@ fn correct_wrong_layout_ascii_technical_token(token: &str) -> Option<String> {
     if converted == token || !is_ascii_technical_token(&converted) {
         return None;
     }
-    if !has_clear_ascii_technical_layout_signal(&converted) {
-        return None;
-    }
 
     let has_clear_separator = converted.contains('-');
     let has_short_ascii_segment = converted
         .split(['-', '_', '.'])
         .any(|part| (2..=4).contains(&part.chars().count()));
     let original_known_hyphen_word =
-        token.contains('-') && is_cyrillic_hyphenated_word_for_layout(token);
+        token.contains('-') && is_known_cyrillic_hyphenated_word(token);
 
     if has_clear_separator && has_short_ascii_segment && !original_known_hyphen_word {
         Some(converted)
     } else {
         None
     }
-}
-
-fn has_clear_ascii_technical_layout_signal(token: &str) -> bool {
-    let alpha_total = token.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
-    let alpha_segment = token
-        .split(['-', '_', '.', '@', '/', '\\', ':', '+', '#'])
-        .any(|part| part.chars().filter(|ch| ch.is_ascii_alphabetic()).count() >= 2);
-
-    alpha_total >= 4 && alpha_segment
-}
-
-fn correct_glued_russian_phrase(word: &str) -> Option<String> {
-    let char_len = word.chars().count();
-    if !(4..=24).contains(&char_len) || !word.chars().all(is_cyrillic_letter) {
-        return None;
-    }
-
-    let lower = word.to_lowercase();
-    if russian_dictionary().contains(&lower)
-        || russian_generated_form_dictionary().contains(&lower)
-        || (is_known_russian_word_or_form(&lower) && !looks_like_word_glued_to_trailing_ya(&lower))
-    {
-        return None;
-    }
-
-    let mut best: Option<(String, f64)> = None;
-    let mut second_best = f64::NEG_INFINITY;
-    for split_at in lower
-        .char_indices()
-        .skip(1)
-        .map(|(idx, _)| idx)
-        .take(char_len.saturating_sub(1))
-    {
-        let (left, right) = lower.split_at(split_at);
-        let left_len = left.chars().count();
-        let right_len = right.chars().count();
-        let short_left_pronoun = left_len == 1 && is_single_letter_russian_pronoun(left);
-        let short_right_function =
-            right_len == 1 && left_len >= 4 && is_single_letter_russian_pronoun(right);
-        if left_len == 1 && !short_left_pronoun {
-            continue;
-        }
-        if (right_len < 3 && !short_right_function) || left_len > 8 {
-            continue;
-        }
-        if !is_known_russian_phrase_part(left) || !is_known_russian_phrase_part(right) {
-            continue;
-        }
-
-        let candidate = format!("{left} {right}");
-        let margin = lay::ngram::ru_candidate_margin(&candidate, &lower);
-        if !is_confident_glued_phrase_split(left, right) && margin < NGRAM_GLUED_SPLIT_MARGIN {
-            continue;
-        }
-
-        match &best {
-            Some((_, best_margin)) if margin <= *best_margin => {
-                second_best = second_best.max(margin);
-            }
-            Some((_, best_margin)) => {
-                second_best = second_best.max(*best_margin);
-                best = Some((candidate, margin));
-            }
-            None => best = Some((candidate, margin)),
-        }
-    }
-
-    let (candidate, best_margin) = best?;
-    if best_margin - second_best < 0.40 {
-        return None;
-    }
-    Some(apply_phrase_case(word, &candidate))
-}
-
-fn looks_like_word_glued_to_trailing_ya(word: &str) -> bool {
-    let Some(left) = word.strip_suffix('я') else {
-        return false;
-    };
-    left.chars().count() >= 4 && is_known_russian_phrase_part(left)
-}
-
-fn is_known_russian_phrase_part(word: &str) -> bool {
-    let len = word.chars().count();
-    if len == 1 {
-        return is_one_letter_russian_function_word(word);
-    }
-    if len <= 3 {
-        return russian_tiny_dictionary().contains(word)
-            || russian_short_dictionary().contains(word);
-    }
-    is_known_russian_word_or_form(word)
-        || is_known_russian_adverb_o_form(word)
-        || is_known_russian_ka_oblique_form(word)
-        || russian_short_dictionary().contains(word)
-}
-
-fn is_one_letter_russian_function_word(word: &str) -> bool {
-    matches!(word, "а" | "в" | "и" | "к" | "о" | "с" | "у" | "я")
-}
-
-fn is_single_letter_russian_pronoun(word: &str) -> bool {
-    word == "я"
-}
-
-fn is_confident_glued_phrase_split(left: &str, right: &str) -> bool {
-    (left.chars().count() == 1 && is_single_letter_russian_pronoun(left))
-        || (right.chars().count() == 1
-            && left.chars().count() >= 4
-            && is_single_letter_russian_pronoun(right))
-        || (left.chars().count() >= 4
-            && right.chars().count() >= 4
-            && is_known_russian_adverb_o_form(right))
 }
 
 fn should_keep_plain_cyrillic_before_ascii_technical(original: &str, converted: &str) -> bool {
@@ -3665,6 +2870,14 @@ fn correct_split_word_pair(text: &str) -> Option<String> {
 
     let glued = format!("{left}{right}");
     if glued.chars().count() < 4 || !is_cyrillic_word(&glued) {
+        return None;
+    }
+
+    // Не склеиваем, если правая часть — самостоятельное короткое слово/союз
+    // из одной буквы (и, я, а, в, к, с, у, о). Без этого guard эвристика
+    // суффиксов ловит ложно: "привет и" → "привети", потому что "и" формально
+    // суффикс существительного, а "привет" — известный корень.
+    if is_ru_single_letter_function_word(right) {
         return None;
     }
 
@@ -3760,16 +2973,6 @@ fn correct_moved_prefix_letter_pair(text: &str) -> Option<String> {
                 return Some(format!("{candidate}{right_trailing}"));
             }
         }
-    }
-
-    if left_candidate.chars().count() <= 3
-        && !is_known_russian_word_or_form(&left.to_lowercase())
-        && (russian_tiny_dictionary().contains(&left_candidate_lower)
-            || russian_short_dictionary().contains(&left_candidate_lower))
-        && right_rest.chars().count() >= 5
-        && is_known_russian_phrase_part(&right_rest_lower)
-    {
-        return Some(format!("{candidate}{right_trailing}"));
     }
 
     if left_candidate.chars().count() < 5 || right_rest.chars().count() < 5 {
@@ -3967,9 +3170,6 @@ fn correct_extra_letters(word: &str) -> Option<String> {
     if is_known_russian_word_or_form(&lower) {
         return None;
     }
-    if lower.ends_with("тся") {
-        return None;
-    }
 
     best_unique_known_ngram_candidate(
         word,
@@ -4003,17 +3203,6 @@ fn correct_verb_ending_confusion(word: &str) -> Option<String> {
     let lower = word.to_lowercase();
     if is_known_russian_word_or_form(&lower) {
         return None;
-    }
-
-    if let Some(stem) = lower.strip_suffix("тся") {
-        if stem.chars().count() >= 3 {
-            let candidate = format!("{stem}ться");
-            if is_known_russian_word_or_form(&candidate)
-                && ngram_allows_ru_candidate(&candidate, &lower, NGRAM_VERB_ENDING_MARGIN)
-            {
-                return Some(apply_word_case(word, &candidate));
-            }
-        }
     }
 
     for (from, to) in [("ешь", "ишь"), ("ет", "ит")] {
@@ -4098,6 +3287,9 @@ fn effective_replace_words(
     auto_replace: bool,
 ) -> usize {
     let replace_words = replace_words.clamp(1, MAX_REPLACE_WORDS);
+    if engine == CorrectionEngine::Smart && !buf.has_current_word() && !buf.replay_toggle_ready() {
+        return 1;
+    }
     if engine == CorrectionEngine::Replay && auto_replace && should_expand_auto_replace_context(buf)
     {
         return replace_words.max(2);
@@ -4128,78 +3320,22 @@ fn decide_correction(original: &str, converted: &str, engine: CorrectionEngine) 
 }
 
 fn decide_scoped_tail_correction(events: &[KeyEvent]) -> Option<String> {
-    decide_scoped_tail_correction_impl(events, None)
-}
-
-#[cfg(test)]
-fn decide_scoped_tail_correction_with_lem(events: &[KeyEvent], enabled: bool) -> Option<String> {
-    decide_scoped_tail_correction_impl(events, Some(enabled))
-}
-
-fn decide_scoped_tail_correction_impl(
-    events: &[KeyEvent],
-    lem_override: Option<bool>,
-) -> Option<String> {
     let words = split_event_words(events)?;
     if words.len() < 2 {
         return None;
     }
 
     let original = map_original_events(events);
-    let has_trailing_space = events
-        .last()
-        .is_some_and(|event| event.keycode == KeyCode::KEY_SPACE.code());
-    let lem_enabled = lem_override.unwrap_or_else(|| active_lem_enabled_for_scope(words.len()));
-    if lem_enabled {
-        let candidates = scoped_tail_lem_candidates(&words, !has_trailing_space)
-            .into_iter()
-            .map(|candidate| {
-                if has_trailing_space {
-                    format!("{candidate} ")
-                } else {
-                    candidate
-                }
-            });
-        let ranked = lay::lem::rank_candidates(&original, candidates);
-        if let Some(best) = ranked.first() {
-            let margin = ranked
-                .get(1)
-                .map(|second| best.total - second.total)
-                .unwrap_or(f64::INFINITY);
-            log(&format!(
-                "  smart: LEM{} total={:.3} margin={:.3} lang={:.3} noise={:.2} edit={:.2} int={:.2} {:?}",
-                words.len(),
-                best.total,
-                margin,
-                best.language,
-                best.noise,
-                best.edit,
-                best.intervention,
-                best.text
-            ));
-            let mut best_text = best.text.clone();
-            if has_trailing_space && !best_text.ends_with(' ') {
-                best_text.push(' ');
-            }
-            if best_text != original && !best_text.trim().is_empty() {
-                return Some(best_text);
-            }
-        }
-    }
-
     let mut out = String::with_capacity(original.len());
     for (idx, word) in words.iter().enumerate() {
         if idx > 0 {
             out.push(' ');
         }
-        if idx + 1 == words.len() && !has_trailing_space {
+        if idx + 1 == words.len() {
             out.push_str(&flip_word_events(word));
         } else {
             out.push_str(&decide_completed_scope_word(word));
         }
-    }
-    if has_trailing_space {
-        out.push(' ');
     }
 
     if out != original && !out.trim().is_empty() {
@@ -4209,99 +3345,17 @@ fn decide_scoped_tail_correction_impl(
     }
 }
 
-fn scoped_tail_lem_candidates(words: &[&[KeyEvent]], last_word_is_current: bool) -> Vec<String> {
-    let mut states: Vec<Vec<String>> = Vec::with_capacity(words.len());
-    for (idx, word) in words.iter().enumerate() {
-        let is_current_tail = last_word_is_current && idx + 1 == words.len();
-        states.push(scoped_word_lem_options(word, is_current_tail));
-    }
-
-    let mut out = Vec::new();
-    build_phrase_candidates(&states, 0, &mut Vec::new(), &mut out);
-    out
-}
-
-fn scoped_word_lem_options(word: &[KeyEvent], is_current_tail: bool) -> Vec<String> {
-    let original = map_original_events(word);
-    let mut out = Vec::new();
-    if is_current_tail {
-        push_unique_string(&mut out, flip_word_events(word));
-        return out;
-    }
-
-    if let Some(repaired) = confident_completed_scope_repair(&original) {
-        push_unique_string(&mut out, repaired);
-        return out;
-    }
-
-    push_unique_string(&mut out, original.clone());
-    push_unique_string(&mut out, decide_completed_scope_word(word));
-    if let Some(repaired) =
-        apply_typing_assist(&format!("{original} "), active_auto_switch_layout())
-    {
-        push_unique_string(&mut out, repaired.trim().to_string());
-    }
-    let flipped = flip_word_events(word);
-    if is_plausible_completed_scope_flip(&flipped) {
-        push_unique_string(&mut out, flipped);
-    }
-    out
-}
-
-fn confident_completed_scope_repair(original: &str) -> Option<String> {
-    lay::llm::repair_mixed_script(original)
-        .or_else(|| correct_duplicate_layout_prefix_on_ascii_token(original))
-        .or_else(|| correct_wrong_layout_ascii_technical_token(original))
-        .or_else(|| correct_wrong_layout_ascii_word(original))
-}
-
-fn is_plausible_completed_scope_flip(flipped: &str) -> bool {
-    flipped.chars().any(|ch| ch.is_alphabetic())
-}
-
-fn build_phrase_candidates(
-    states: &[Vec<String>],
-    idx: usize,
-    current: &mut Vec<String>,
-    out: &mut Vec<String>,
-) {
-    if idx == states.len() {
-        push_unique_string(out, current.join(" "));
-        return;
-    }
-    for option in &states[idx] {
-        current.push(option.clone());
-        build_phrase_candidates(states, idx + 1, current, out);
-        current.pop();
-    }
-}
-
-fn push_unique_string(out: &mut Vec<String>, value: String) {
-    if !value.trim().is_empty() && !out.iter().any(|item| item == &value) {
-        out.push(value);
-    }
-}
-
 fn split_event_words(events: &[KeyEvent]) -> Option<Vec<&[KeyEvent]>> {
-    if events.is_empty() {
-        return None;
-    }
-
-    let end = if events
+    if events
         .last()
-        .is_some_and(|event| event.keycode == KeyCode::KEY_SPACE.code())
+        .map_or(true, |event| event.keycode == KeyCode::KEY_SPACE.code())
     {
-        events.len().saturating_sub(1)
-    } else {
-        events.len()
-    };
-    if end == 0 {
         return None;
     }
 
     let mut words = Vec::new();
     let mut start = 0;
-    for (idx, event) in events.iter().take(end).enumerate() {
+    for (idx, event) in events.iter().enumerate() {
         if event.keycode == KeyCode::KEY_SPACE.code() {
             if start < idx {
                 words.push(&events[start..idx]);
@@ -4309,8 +3363,8 @@ fn split_event_words(events: &[KeyEvent]) -> Option<Vec<&[KeyEvent]>> {
             start = idx + 1;
         }
     }
-    if start < end {
-        words.push(&events[start..end]);
+    if start < events.len() {
+        words.push(&events[start..]);
     }
 
     (!words.is_empty()).then_some(words)
@@ -4322,9 +3376,6 @@ fn decide_completed_scope_word(word: &[KeyEvent]) -> String {
         return repaired;
     }
     if let Some(repaired) = correct_wrong_layout_ascii_technical_token(&original) {
-        return repaired;
-    }
-    if let Some(repaired) = correct_wrong_layout_ascii_word(&original) {
         return repaired;
     }
     let converted = flip_word_events(word);
@@ -4380,7 +3431,7 @@ fn repair_cyrillic_prefix_before_ascii_tail(word: &[KeyEvent]) -> Option<String>
     }
 
     let all_ru = map_events_to_layout(word, true);
-    if all_ru != map_original_events(word) && is_cyrillic_hyphenated_word_for_layout(&all_ru) {
+    if all_ru != map_original_events(word) && is_known_cyrillic_hyphenated_word(&all_ru) {
         return Some(all_ru);
     }
 
@@ -4397,7 +3448,7 @@ fn repair_cyrillic_prefix_before_ascii_tail(word: &[KeyEvent]) -> Option<String>
     if candidate == all_ru || candidate == map_original_events(word) {
         return None;
     }
-    is_cyrillic_hyphenated_word_for_layout(&candidate).then_some(candidate)
+    is_known_cyrillic_hyphenated_word(&candidate).then_some(candidate)
 }
 
 fn same_letter_ignore_case(left: char, right: char) -> bool {
@@ -4411,58 +3462,6 @@ fn is_known_cyrillic_hyphenated_word(word: &str) -> bool {
     let dict = russian_short_dictionary();
     word.split('-')
         .all(|part| part.chars().count() >= 3 && is_known_cyrillic_hyphen_part(part, dict))
-}
-
-fn is_cyrillic_hyphenated_word_for_layout(word: &str) -> bool {
-    is_known_cyrillic_hyphenated_word(word) || is_plausible_cyrillic_hyphenated_word(word)
-}
-
-fn is_plausible_cyrillic_hyphenated_word(word: &str) -> bool {
-    if !word.contains('-') || !is_cyrillic_word(word) {
-        return false;
-    }
-    let parts: Vec<&str> = word.split('-').collect();
-    if parts.len() < 2 || parts.iter().any(|part| part.is_empty()) {
-        return false;
-    }
-
-    let mut strong_parts = 0usize;
-    for part in parts {
-        let lower = part.to_lowercase();
-        let len = lower.chars().count();
-        if len < 2 || !lower.chars().any(is_russian_vowel) {
-            return false;
-        }
-        if len >= 3 || is_known_cyrillic_hyphen_part(&lower, russian_short_dictionary()) {
-            strong_parts += 1;
-        }
-    }
-    strong_parts >= 2
-}
-
-fn is_russian_vowel(ch: char) -> bool {
-    matches!(
-        ch,
-        'а' | 'е'
-            | 'ё'
-            | 'и'
-            | 'о'
-            | 'у'
-            | 'ы'
-            | 'э'
-            | 'ю'
-            | 'я'
-            | 'А'
-            | 'Е'
-            | 'Ё'
-            | 'И'
-            | 'О'
-            | 'У'
-            | 'Ы'
-            | 'Э'
-            | 'Ю'
-            | 'Я'
-    )
 }
 
 fn is_known_cyrillic_hyphen_part(part: &str, dict: &HashSet<String>) -> bool {
@@ -4487,8 +3486,19 @@ fn is_known_russian_word_or_form(word: &str) -> bool {
     russian_dictionary().contains(word)
         || russian_generated_form_dictionary().contains(word)
         || is_known_russian_suffix_form(word)
-        || is_known_russian_ka_declension_form(word)
         || is_known_russian_verb_form(word)
+}
+
+/// Однобуквенные русские служебные слова. Используются как guard в правилах
+/// склеивания/перемещения букв между словами — такие токены не должны
+/// «прилипать» к соседям ("привет и" не должно превращаться в "привети").
+fn is_ru_single_letter_function_word(token: &str) -> bool {
+    let mut chars = token.chars();
+    let (Some(c), None) = (chars.next(), chars.next()) else {
+        return false;
+    };
+    let lower = c.to_lowercase().next().unwrap_or(c);
+    matches!(lower, 'и' | 'я' | 'а' | 'в' | 'к' | 'с' | 'у' | 'о' | 'ю')
 }
 
 fn is_known_russian_suffix_form(word: &str) -> bool {
@@ -4506,55 +3516,8 @@ fn is_known_russian_suffix_form(word: &str) -> bool {
         let Some(stem) = word.strip_suffix(suffix) else {
             return false;
         };
-        if stem.chars().count() < 3 {
-            return false;
-        }
-        if russian_dictionary().contains(stem) {
-            return true;
-        }
-        matches!(*suffix, "ами" | "ями")
-            && (russian_short_dictionary().contains(stem)
-                || russian_dictionary().contains(&format!("{stem}о")))
+        stem.chars().count() >= 3 && russian_dictionary().contains(stem)
     })
-}
-
-fn is_known_russian_adverb_o_form(word: &str) -> bool {
-    if word.chars().count() < 5 {
-        return false;
-    }
-    let Some(stem) = word.strip_suffix('о') else {
-        return false;
-    };
-    if stem.chars().count() < 3 {
-        return false;
-    }
-
-    ["ый", "ий", "ой"]
-        .iter()
-        .any(|suffix| russian_dictionary().contains(&format!("{stem}{suffix}")))
-}
-
-fn is_known_russian_ka_declension_form(word: &str) -> bool {
-    if word.chars().count() < 5 {
-        return false;
-    }
-    let Some(stem) = word.strip_suffix("ок") else {
-        return false;
-    };
-    stem.chars().count() >= 3 && russian_dictionary().contains(&format!("{stem}ка"))
-}
-
-fn is_known_russian_ka_oblique_form(word: &str) -> bool {
-    if word.chars().count() < 5 {
-        return false;
-    }
-    for suffix in ["ками", "ках", "кой", "ки", "ке", "ку"] {
-        if let Some(stem) = word.strip_suffix(suffix) {
-            return stem.chars().count() >= 3
-                && russian_dictionary().contains(&format!("{stem}ка"));
-        }
-    }
-    false
 }
 
 fn is_known_russian_verb_form(word: &str) -> bool {
@@ -4563,14 +3526,8 @@ fn is_known_russian_verb_form(word: &str) -> bool {
     }
 
     const ENDINGS: &[(&str, &[&str])] = &[
-        ("айте", &["ать"]),
         ("ишь", &["ить", "еть"]),
-        ("ай", &["ать"]),
         ("ит", &["ить", "еть"]),
-        ("ает", &["ать"]),
-        ("ают", &["ать"]),
-        ("аешь", &["ать"]),
-        ("аете", &["ать"]),
         ("ется", &["ться"]),
         ("ются", &["ться"]),
         ("ился", &["иться"]),
@@ -4707,30 +3664,6 @@ fn push_with_overlap(out: &mut String, next: &str) {
 }
 
 fn plan_text_replacement(original: &str, replacement: &str) -> Option<TextReplacement> {
-    plan_text_replacement_with_options(original, replacement, true)
-}
-
-fn plan_committed_tail_replacement(original: &str, replacement: &str) -> Option<TextReplacement> {
-    let original_ends_with_space = original
-        .chars()
-        .next_back()
-        .is_some_and(char::is_whitespace);
-    let replacement_ends_with_space = replacement
-        .chars()
-        .next_back()
-        .is_some_and(char::is_whitespace);
-    if !original_ends_with_space || !replacement_ends_with_space {
-        return plan_text_replacement(original, replacement);
-    }
-
-    plan_text_replacement_with_options(original, replacement, false)
-}
-
-fn plan_text_replacement_with_options(
-    original: &str,
-    replacement: &str,
-    keep_trailing_whitespace_suffix: bool,
-) -> Option<TextReplacement> {
     if original == replacement {
         return None;
     }
@@ -4752,11 +3685,6 @@ fn plan_text_replacement_with_options(
         && original_chars[original_chars.len() - 1 - suffix]
             == replacement_chars[replacement_chars.len() - 1 - suffix]
     {
-        if !keep_trailing_whitespace_suffix
-            && original_chars[original_chars.len() - 1 - suffix].is_whitespace()
-        {
-            break;
-        }
         suffix += 1;
     }
 
@@ -4881,7 +3809,8 @@ where
 {
     let lower = original.to_lowercase();
     let mut seen = HashSet::new();
-    let mut found: Option<String> = None;
+    let mut best: Option<(String, f64)> = None;
+    let mut second_best = f64::NEG_INFINITY;
 
     for candidate in candidates {
         if candidate == lower || !seen.insert(candidate.clone()) {
@@ -4896,13 +3825,23 @@ where
             continue;
         }
 
-        if found.is_some() {
-            return None;
+        match &best {
+            Some((_, best_margin)) if margin <= *best_margin => {
+                second_best = second_best.max(margin);
+            }
+            Some((_, best_margin)) => {
+                second_best = second_best.max(*best_margin);
+                best = Some((candidate, margin));
+            }
+            None => best = Some((candidate, margin)),
         }
-        found = Some(candidate);
     }
 
-    found.map(|candidate| apply_word_case(original, &candidate))
+    let (candidate, best_margin) = best?;
+    if best_margin - second_best < 0.40 {
+        return None;
+    }
+    Some(apply_word_case(original, &candidate))
 }
 
 fn generate_missing_letter_candidates(lower: &str) -> impl Iterator<Item = String> + '_ {
@@ -4926,56 +3865,18 @@ fn generate_extra_letter_candidates(lower: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut candidates = Vec::new();
 
-    for idx in 0..chars.len() {
-        if is_russian_vowel(chars[idx]) {
+    for delete_len in [1usize, 2] {
+        if chars.len() < delete_len + 5 {
             continue;
         }
-        let mut candidate = String::with_capacity(lower.len());
-        candidate.extend(chars[..idx].iter());
-        candidate.extend(chars[idx + 1..].iter());
-        if seen.insert(candidate.clone()) {
-            candidates.push(candidate);
-        }
-    }
-
-    if chars.len() >= 7 {
-        for idx in 0..=chars.len() - 2 {
-            if idx + 2 == chars.len() {
-                continue;
-            }
-            if chars[idx..idx + 2].iter().all(|ch| is_russian_vowel(*ch)) {
-                continue;
-            }
+        for idx in 0..=chars.len() - delete_len {
             let mut candidate = String::with_capacity(lower.len());
             candidate.extend(chars[..idx].iter());
-            candidate.extend(chars[idx + 2..].iter());
+            candidate.extend(chars[idx + delete_len..].iter());
             if seen.insert(candidate.clone()) {
                 candidates.push(candidate);
             }
         }
-    }
-
-    let mut idx = 0usize;
-    while idx < chars.len() {
-        let mut end = idx + 1;
-        while end < chars.len() && chars[end] == chars[idx] {
-            end += 1;
-        }
-
-        let run_len = end - idx;
-        if run_len > 1 {
-            for keep in 1..run_len {
-                let mut candidate = String::with_capacity(lower.len());
-                candidate.extend(chars[..idx].iter());
-                candidate.extend(std::iter::repeat(chars[idx]).take(keep));
-                candidate.extend(chars[end..].iter());
-                if seen.insert(candidate.clone()) {
-                    candidates.push(candidate);
-                }
-            }
-        }
-
-        idx = end;
     }
 
     candidates
@@ -5076,19 +3977,37 @@ fn capitalize_first(text: &str) -> String {
     out
 }
 
-fn english_dictionary() -> &'static HashSet<String> {
+/// Пользовательский список ASCII-токенов, которые НЕ трогаем ни авто-заменой,
+/// ни автопереключением раскладки. Туда кладут команды терминала, алиасы,
+/// технические идентификаторы. Файл: `~/.config/lay/no_replace.txt`,
+/// по одному токену в строке, регистр игнорируется.
+fn no_replace_tokens() -> &'static HashSet<String> {
     static WORDS: OnceLock<HashSet<String>> = OnceLock::new();
     WORDS.get_or_init(|| {
-        let mut words = load_ascii_hunspell_words_min_len("/usr/share/hunspell/en_US.dic", 4)
-            .unwrap_or_else(|e| {
-                log(&format!("⚠ en dictionary load failed: {e}"));
-                HashSet::new()
-            });
-        if let Ok(extra) = load_ascii_word_list_min_len("/usr/share/dict/words", 4) {
-            words.extend(extra);
-        }
-        words
+        let Some(home) = std::env::var_os("HOME") else {
+            return HashSet::new();
+        };
+        let path = std::path::PathBuf::from(home).join(NO_REPLACE_PATH);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return HashSet::new();
+        };
+        text.lines()
+            .map(|l| l.split('#').next().unwrap_or("").trim().to_lowercase())
+            .filter(|l| !l.is_empty())
+            .collect()
     })
+}
+
+fn is_no_replace_token(token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    let set = no_replace_tokens();
+    if set.is_empty() {
+        return false;
+    }
+    let lower = token.to_lowercase();
+    set.contains(&lower)
 }
 
 fn russian_dictionary() -> &'static HashSet<String> {
@@ -5107,7 +4026,6 @@ fn russian_dictionary() -> &'static HashSet<String> {
         }
         #[cfg(test)]
         words.extend(test_russian_forms().into_iter().map(str::to_string));
-        words.extend(COMMON_RUSSIAN_WORDS.iter().copied().map(str::to_string));
         words
     })
 }
@@ -5125,13 +4043,10 @@ fn russian_short_dictionary() -> &'static HashSet<String> {
             let mut words = words;
             words.extend(test_russian_forms().into_iter().map(str::to_string));
             words.insert("пара".to_string());
-            words.extend(COMMON_RUSSIAN_WORDS.iter().copied().map(str::to_string));
             words
         }
         #[cfg(not(test))]
         {
-            let mut words = words;
-            words.extend(COMMON_RUSSIAN_WORDS.iter().copied().map(str::to_string));
             words
         }
     })
@@ -5150,13 +4065,10 @@ fn russian_tiny_dictionary() -> &'static HashSet<String> {
             let mut words = words;
             words.extend(test_russian_forms().into_iter().map(str::to_string));
             words.insert("не".to_string());
-            words.extend(COMMON_RUSSIAN_WORDS.iter().copied().map(str::to_string));
             words
         }
         #[cfg(not(test))]
         {
-            let mut words = words;
-            words.extend(COMMON_RUSSIAN_WORDS.iter().copied().map(str::to_string));
             words
         }
     })
@@ -5199,33 +4111,6 @@ fn test_russian_forms() -> [&'static str; 16] {
     ]
 }
 
-fn load_ascii_hunspell_words_min_len(
-    path: &str,
-    min_chars: usize,
-) -> std::io::Result<HashSet<String>> {
-    let text = std::fs::read_to_string(path)?;
-    let mut words = HashSet::new();
-    for line in text.lines().skip(1) {
-        let word = line.split('/').next().unwrap_or("").trim().to_lowercase();
-        if word.chars().count() >= min_chars && is_plain_ascii_word_candidate(&word) {
-            words.insert(word);
-        }
-    }
-    Ok(words)
-}
-
-fn load_ascii_word_list_min_len(path: &str, min_chars: usize) -> std::io::Result<HashSet<String>> {
-    let text = std::fs::read_to_string(path)?;
-    let mut words = HashSet::new();
-    for line in text.lines() {
-        let word = line.trim().to_lowercase();
-        if word.chars().count() >= min_chars && is_plain_ascii_word_candidate(&word) {
-            words.insert(word);
-        }
-    }
-    Ok(words)
-}
-
 fn load_hunspell_words_min_len(path: &str, min_chars: usize) -> std::io::Result<HashSet<String>> {
     let text = std::fs::read_to_string(path)?;
     let mut words = HashSet::new();
@@ -5241,13 +4126,7 @@ fn load_hunspell_words_min_len(path: &str, min_chars: usize) -> std::io::Result<
 struct HunspellSuffixRule {
     strip: String,
     add: String,
-    condition: Vec<HunspellConditionToken>,
-}
-
-#[derive(Clone)]
-enum HunspellConditionToken {
-    Literal(char),
-    Class { negated: bool, chars: Vec<char> },
+    condition: String,
 }
 
 fn load_hunspell_generated_forms_min_len(
@@ -5313,87 +4192,26 @@ fn load_simple_hunspell_suffix_rules(
         let Some(flag) = parts[1].chars().next() else {
             continue;
         };
-        let Some(condition) = parse_hunspell_suffix_condition(parts[4]) else {
+        let condition = parts[4];
+        if !is_simple_hunspell_suffix_condition(condition) {
             continue;
-        };
+        }
         rules.entry(flag).or_default().push(HunspellSuffixRule {
             strip: parts[2].to_string(),
             add: parts[3].split('/').next().unwrap_or(parts[3]).to_string(),
-            condition,
+            condition: condition.to_string(),
         });
     }
 
     Ok(rules)
 }
 
-fn parse_hunspell_suffix_condition(condition: &str) -> Option<Vec<HunspellConditionToken>> {
-    if condition == "." {
-        return Some(Vec::new());
-    }
-
-    let mut tokens = Vec::new();
-    let mut chars = condition.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '[' {
-            let negated = if chars.peek() == Some(&'^') {
-                chars.next();
-                true
-            } else {
-                false
-            };
-            let mut class_chars = Vec::new();
-            let mut closed = false;
-            for class_ch in chars.by_ref() {
-                if class_ch == ']' {
-                    closed = true;
-                    break;
-                }
-                if !is_cyrillic_letter(class_ch) {
-                    return None;
-                }
-                class_chars.push(class_ch);
-            }
-            if !closed || class_chars.is_empty() {
-                return None;
-            }
-            tokens.push(HunspellConditionToken::Class {
-                negated,
-                chars: class_chars,
-            });
-        } else if is_cyrillic_letter(ch) {
-            tokens.push(HunspellConditionToken::Literal(ch));
-        } else {
-            return None;
-        }
-    }
-
-    (!tokens.is_empty()).then_some(tokens)
+fn is_simple_hunspell_suffix_condition(condition: &str) -> bool {
+    condition == "." || condition.chars().all(is_cyrillic_letter)
 }
 
-fn hunspell_condition_matches(word: &str, condition: &[HunspellConditionToken]) -> bool {
-    if condition.is_empty() {
-        return true;
-    }
-
-    let chars: Vec<char> = word.chars().collect();
-    if chars.len() < condition.len() {
-        return false;
-    }
-    let start = chars.len() - condition.len();
-    condition
-        .iter()
-        .zip(chars[start..].iter().copied())
-        .all(|(token, ch)| match token {
-            HunspellConditionToken::Literal(expected) => *expected == ch,
-            HunspellConditionToken::Class { negated, chars } => {
-                let contains = chars.contains(&ch);
-                if *negated {
-                    !contains
-                } else {
-                    contains
-                }
-            }
-        })
+fn hunspell_condition_matches(word: &str, condition: &str) -> bool {
+    condition == "." || word.ends_with(condition)
 }
 
 fn load_word_list(path: &std::path::Path) -> std::io::Result<HashSet<String>> {
@@ -5428,10 +4246,8 @@ fn replace_visual_b_words(original: &str, base: &str) -> Option<String> {
 
     let mut changed = false;
     let mut out = String::with_capacity(base.len());
-    for (idx, ((orig, orig_ws), (base_part, base_ws))) in original_segments
-        .iter()
-        .zip(base_segments.iter())
-        .enumerate()
+    for ((orig, orig_ws), (base_part, base_ws)) in
+        original_segments.iter().zip(base_segments.iter())
     {
         if orig_ws != base_ws {
             return None;
@@ -5442,23 +4258,13 @@ fn replace_visual_b_words(original: &str, base: &str) -> Option<String> {
         }
 
         let replacement = match *orig {
-            "b" => Some(visual_b_replacement(
-                &original_segments,
-                &base_segments,
-                idx,
-                false,
-            )),
-            "B" => Some(visual_b_replacement(
-                &original_segments,
-                &base_segments,
-                idx,
-                true,
-            )),
+            "b" => Some("в"),
+            "B" => Some("В"),
             _ => None,
         };
         if let Some(replacement) = replacement {
             changed = true;
-            out.push_str(&replacement);
+            out.push_str(replacement);
         } else {
             out.push_str(base_part);
         }
@@ -5469,41 +4275,6 @@ fn replace_visual_b_words(original: &str, base: &str) -> Option<String> {
     } else {
         None
     }
-}
-
-fn visual_b_replacement(
-    original_segments: &[(&str, bool)],
-    base_segments: &[(&str, bool)],
-    idx: usize,
-    uppercase: bool,
-) -> String {
-    let prev = previous_word_segment(original_segments, idx);
-    let base = base_segments.get(idx).map(|(text, _)| *text).unwrap_or("");
-
-    let wants_layout_i = prev.is_some_and(is_ascii_word_token)
-        || (base.eq_ignore_ascii_case("и") && prev.is_some_and(is_ascii_word_token));
-    let replacement = if wants_layout_i { "и" } else { "в" };
-    if uppercase {
-        replacement.to_uppercase()
-    } else {
-        replacement.to_string()
-    }
-}
-
-fn previous_word_segment<'a>(segments: &'a [(&str, bool)], idx: usize) -> Option<&'a str> {
-    segments[..idx]
-        .iter()
-        .rev()
-        .find_map(|(text, is_ws)| (!*is_ws).then_some(*text))
-}
-
-fn is_ascii_word_token(token: &str) -> bool {
-    let (_, core, _) = split_word_punctuation(token);
-    !core.is_empty()
-        && core.chars().any(|ch| ch.is_ascii_alphabetic())
-        && core
-            .chars()
-            .all(|ch| ch.is_ascii_alphabetic() || matches!(ch, '-' | '_' | '.'))
 }
 
 fn split_ws_segments(text: &str) -> Vec<(&str, bool)> {
@@ -5922,6 +4693,98 @@ mod tests {
         }
     }
 
+    /// Помощник: прогоняет последовательность тапов через update_gesture_fsm
+    /// и возвращает true если жест замкнулся.
+    fn run_gesture_seq(events: &[(KeyCode, i32, u64)]) -> bool {
+        let mut state = GestureState::Idle;
+        let mut lshift = None;
+        let mut lctrl = None;
+        let mut last = None;
+        let tap_max = Duration::from_millis(200);
+        let step_window = Duration::from_millis(350);
+        let total_window = Duration::from_millis(900);
+        for (key, value, _delay_ms) in events {
+            // Между событиями искусственная задержка не добавляется в тесте —
+            // полагаемся на физическое время std::thread::sleep вызова.
+            // Для unit-теста этого достаточно (всё происходит за < tap_max).
+            let fired = update_gesture_fsm(
+                *key,
+                *value,
+                tap_max,
+                step_window,
+                total_window,
+                &mut state,
+                &mut lshift,
+                &mut lctrl,
+                &mut last,
+            );
+            if fired {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn gesture_fires_on_shift_ctrl_shift_shift() {
+        let seq = [
+            (KeyCode::KEY_LEFTSHIFT, 1, 0),
+            (KeyCode::KEY_LEFTSHIFT, 0, 0),
+            (KeyCode::KEY_LEFTCTRL, 1, 0),
+            (KeyCode::KEY_LEFTCTRL, 0, 0),
+            (KeyCode::KEY_LEFTSHIFT, 1, 0),
+            (KeyCode::KEY_LEFTSHIFT, 0, 0),
+            (KeyCode::KEY_LEFTSHIFT, 1, 0),
+            (KeyCode::KEY_LEFTSHIFT, 0, 0),
+        ];
+        assert!(run_gesture_seq(&seq));
+    }
+
+    #[test]
+    fn gesture_does_not_fire_on_double_shift_only() {
+        let seq = [
+            (KeyCode::KEY_LEFTSHIFT, 1, 0),
+            (KeyCode::KEY_LEFTSHIFT, 0, 0),
+            (KeyCode::KEY_LEFTSHIFT, 1, 0),
+            (KeyCode::KEY_LEFTSHIFT, 0, 0),
+        ];
+        assert!(!run_gesture_seq(&seq));
+    }
+
+    #[test]
+    fn gesture_resets_on_letter_in_middle() {
+        let seq = [
+            (KeyCode::KEY_LEFTSHIFT, 1, 0),
+            (KeyCode::KEY_LEFTSHIFT, 0, 0),
+            (KeyCode::KEY_LEFTCTRL, 1, 0),
+            (KeyCode::KEY_LEFTCTRL, 0, 0),
+            (KeyCode::KEY_A, 1, 0), // лишняя буква между Ctrl и второй Shift
+            (KeyCode::KEY_A, 0, 0),
+            (KeyCode::KEY_LEFTSHIFT, 1, 0),
+            (KeyCode::KEY_LEFTSHIFT, 0, 0),
+            (KeyCode::KEY_LEFTSHIFT, 1, 0),
+            (KeyCode::KEY_LEFTSHIFT, 0, 0),
+        ];
+        assert!(!run_gesture_seq(&seq));
+    }
+
+    #[test]
+    fn gesture_ignores_right_modifiers() {
+        // Гест работает только по левым клавишам — правые игнорируются и
+        // не продвигают FSM.
+        let seq = [
+            (KeyCode::KEY_RIGHTSHIFT, 1, 0),
+            (KeyCode::KEY_RIGHTSHIFT, 0, 0),
+            (KeyCode::KEY_RIGHTCTRL, 1, 0),
+            (KeyCode::KEY_RIGHTCTRL, 0, 0),
+            (KeyCode::KEY_RIGHTSHIFT, 1, 0),
+            (KeyCode::KEY_RIGHTSHIFT, 0, 0),
+            (KeyCode::KEY_RIGHTSHIFT, 1, 0),
+            (KeyCode::KEY_RIGHTSHIFT, 0, 0),
+        ];
+        assert!(!run_gesture_seq(&seq));
+    }
+
     fn push_keys(buffer: &mut WordBuffer, keys: &[KeyCode], layout_is_ru: bool) {
         for key in keys {
             buffer.push(key_event(*key, layout_is_ru));
@@ -5942,39 +4805,6 @@ mod tests {
             KeyCode::KEY_F,
             KeyCode::KEY_I,
         ]
-    }
-
-    fn typing_pipeline_with_disabled(disabled: &[&str]) -> Vec<TypingAssistRuleConfig> {
-        default_typing_assist_pipeline()
-            .into_iter()
-            .map(|mut rule| {
-                if disabled.iter().any(|id| *id == rule.id) {
-                    rule.enabled = false;
-                }
-                rule
-            })
-            .collect()
-    }
-
-    fn typing_pipeline_with_only(enabled: &str) -> Vec<TypingAssistRuleConfig> {
-        default_typing_assist_pipeline()
-            .into_iter()
-            .map(|mut rule| {
-                rule.enabled = rule.id == enabled;
-                rule
-            })
-            .collect()
-    }
-
-    fn typing_pipeline_with_first(first: &str) -> Vec<TypingAssistRuleConfig> {
-        let mut rules = default_typing_assist_pipeline();
-        for rule in &mut rules {
-            rule.priority += 10;
-            if rule.id == first {
-                rule.priority = 1;
-            }
-        }
-        rules
     }
 
     #[test]
@@ -6007,50 +4837,6 @@ mod tests {
         assert_eq!(plan.backspaces, 1);
         assert_eq!(plan.insert, "о");
         assert_eq!(plan.move_right, 1);
-    }
-
-    #[test]
-    fn committed_tail_plan_reinserts_trailing_space_after_short_replacement() {
-        let plan = plan_committed_tail_replacement("double b ", "double и ").expect("replacement");
-
-        assert_eq!(plan.move_left, 0);
-        assert_eq!(plan.backspaces, 2);
-        assert_eq!(plan.insert, "и ");
-        assert_eq!(plan.move_right, 0);
-    }
-
-    #[test]
-    fn committed_tail_plan_does_not_leave_space_behind_single_letter_fix() {
-        let plan =
-            plan_committed_tail_replacement("чтобы точнр ", "чтобы точно ").expect("replacement");
-
-        assert_eq!(plan.move_left, 0);
-        assert_eq!(plan.backspaces, 2);
-        assert_eq!(plan.insert, "о ");
-        assert_eq!(plan.move_right, 0);
-    }
-
-    #[test]
-    fn replacement_memory_keeps_space_boundary_after_i_autofix() {
-        let mut buffer = WordBuffer::new();
-        push_text_as_layout(&mut buffer, "double b ", false);
-        let events = buffer
-            .last_completed_words_events(2)
-            .expect("completed two-word tail");
-        let original = map_original_events(&events);
-        let replacement = "double и ";
-        let plan = plan_committed_tail_replacement(&original, replacement).expect("replacement");
-
-        assert!(buffer.remember_replacement_last_word_for_replay(&events, &plan, replacement));
-        assert!(buffer.current.is_empty());
-        assert!(buffer.prev_had_trailing_space);
-        assert_eq!(buffer.prev_words.len(), 1);
-        assert_eq!(map_original_events(&buffer.prev_words[0]), "и");
-
-        push_text_as_layout(&mut buffer, "слово", true);
-        let (tail, _) = buffer.what_to_replay(2).expect("two-word tail");
-
-        assert_eq!(map_original_events(&tail), "и слово");
     }
 
     fn push_key_events(buffer: &mut WordBuffer, keys: &[(KeyCode, bool)], layout_is_ru: bool) {
@@ -6197,19 +4983,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_gdbus_string_tuple() {
-        assert_eq!(parse_gdbus_string("('us',)"), Some("us".to_string()));
-    }
-
-    #[test]
-    fn parses_current_layout_from_list_layouts_reply() {
-        assert_eq!(
-            parse_current_layout_from_list("('0:xkb:us,1:xkb:ru*',)"),
-            Some("ru".to_string())
-        );
-    }
-
-    #[test]
     fn marks_current_word_after_replay_for_next_toggle() {
         let mut buffer = WordBuffer::new();
         for key in [
@@ -6265,76 +5038,8 @@ mod tests {
     }
 
     #[test]
-    fn layout_backend_can_be_explicit_or_auto_detected() {
-        assert_eq!(
-            resolve_layout_backend("gnome", Some("KDE"), None, Some("wayland")),
-            LayoutBackend::Gnome
-        );
-        assert_eq!(
-            resolve_layout_backend("kde", Some("GNOME"), None, Some("wayland")),
-            LayoutBackend::Kde
-        );
-        assert_eq!(
-            resolve_layout_backend("x11", Some("GNOME"), None, Some("wayland")),
-            LayoutBackend::X11
-        );
-        assert_eq!(
-            resolve_layout_backend("auto", Some("KDE"), Some("plasma"), Some("wayland")),
-            LayoutBackend::Kde
-        );
-        assert_eq!(
-            resolve_layout_backend("auto", Some("GNOME"), None, Some("wayland")),
-            LayoutBackend::Gnome
-        );
-        assert_eq!(
-            resolve_layout_backend("auto", None, None, Some("x11")),
-            LayoutBackend::X11
-        );
-    }
-
-    #[test]
-    fn parses_x11_layout_tool_output() {
-        assert_eq!(
-            parse_setxkbmap_layout("rules: evdev\nmodel: pc105\nlayout: us,ru\n"),
-            Some("us".to_string())
-        );
-        assert_eq!(normalize_layout_id(" ru\n"), "ru");
-        assert_eq!(normalize_layout_id("xkb:ru::rus"), "ru");
-        assert!(is_ru_layout_id("xkb:ru"));
-        assert!(!is_ru_layout_id("xkb:us"));
-    }
-
-    #[test]
-    fn config_allows_three_word_scope() {
-        let cfg = LayConfig {
-            replace_words: 3,
-            ..LayConfig::default()
-        };
-        assert_eq!(cfg.active_replace_words(), 3);
-
-        let too_large = LayConfig {
-            replace_words: 8,
-            ..LayConfig::default()
-        };
-        assert_eq!(too_large.active_replace_words(), 3);
-    }
-
-    #[test]
     fn auto_switch_layout_is_enabled_by_default() {
         assert!(LayConfig::default().auto_switch_layout);
-    }
-
-    #[test]
-    fn lem_scope_flags_are_enabled_by_default() {
-        let cfg = LayConfig::default();
-        assert!(!cfg.lem_enabled_for_scope(1));
-        assert!(cfg.lem_enabled_for_scope(2));
-        assert!(cfg.lem_enabled_for_scope(3));
-        assert!(cfg.lem_enabled_for_scope(8));
-        assert_eq!(
-            cfg.active_typing_assist_pipeline().len(),
-            DEFAULT_TYPING_ASSIST_RULES.len()
-        );
     }
 
     #[test]
@@ -6406,7 +5111,7 @@ mod tests {
     }
 
     #[test]
-    fn smart_scope_after_trailing_space_keeps_configured_scope() {
+    fn smart_scope_after_trailing_space_uses_last_completed_word_only() {
         let mut buffer = WordBuffer::new();
         push_keys(
             &mut buffer,
@@ -6431,9 +5136,9 @@ mod tests {
         let scope = effective_replace_words(&buffer, 2, CorrectionEngine::Smart, true);
         let (events, backspaces) = buffer.what_to_replay(scope).expect("last word is buffered");
 
-        assert_eq!(scope, 2);
-        assert_eq!(map_original_events(&events), "короче там ");
-        assert_eq!(backspaces, 11);
+        assert_eq!(scope, 1);
+        assert_eq!(map_original_events(&events), "там ");
+        assert_eq!(backspaces, 4);
     }
 
     #[test]
@@ -6768,8 +5473,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_tail_trailing_space_keeps_previous_good_word_and_flips_current_completed_latin_keys()
-    {
+    fn scoped_tail_trailing_space_flips_only_current_completed_latin_keys() {
         let mut buffer = WordBuffer::new();
         let left_events = [
             KeyEvent {
@@ -6800,23 +5504,17 @@ mod tests {
 
         let scope = effective_replace_words(&buffer, 2, CorrectionEngine::Smart, true);
         let (events, backspaces) = buffer.what_to_replay(scope).expect("last word tail");
-        let left = map_original_events(&left_events);
+        let decision = replay_layout_decision(&events);
         let current_original = map_original_events(&current_events);
         let current_target = map_events_to_layout(&current_events, true);
 
-        assert_eq!(scope, 2);
+        assert_eq!(scope, 1);
+        assert_eq!(map_original_events(&events), format!("{current_original} "));
         assert_eq!(
-            map_original_events(&events),
-            format!("{left} {current_original} ")
+            map_events_to_layout(&events, decision.target_is_ru),
+            format!("{current_target} ")
         );
-        assert_eq!(
-            decide_scoped_tail_correction(&events),
-            Some(format!("{left} {current_target} "))
-        );
-        assert_eq!(
-            backspaces,
-            (left.chars().count() + 1 + current_original.chars().count() + 1) as u32
-        );
+        assert_eq!(backspaces, current_original.chars().count() as u32 + 1);
     }
 
     #[test]
@@ -6915,18 +5613,6 @@ mod tests {
             apply_typing_assist_exact(&format!("{typed_technical} ")),
             Some(format!("{target_technical} "))
         );
-    }
-
-    #[test]
-    fn typing_assist_keeps_natural_cyrillic_hyphen_words() {
-        assert_eq!(apply_typing_assist("кока-коле ", true), None);
-        assert_eq!(apply_typing_assist("код-дэ-вуар ", true), None);
-        assert_eq!(
-            correct_wrong_layout_ascii_technical_token("цш-аш"),
-            Some("wi-fi".to_string())
-        );
-        assert_eq!(correct_wrong_layout_ascii_technical_token("15р-16р"), None);
-        assert_eq!(apply_typing_assist("15р-16р ", true), None);
     }
 
     #[test]
@@ -7100,7 +5786,7 @@ mod tests {
     }
 
     #[test]
-    fn trailing_space_scope_keeps_ascii_hyphen_word_and_flips_last_short_word() {
+    fn trailing_space_replay_flips_last_short_word_after_ascii_hyphen_word() {
         let mut buffer = WordBuffer::new();
         let completed_events = key_events(&ascii_hyphen_token_keycodes(), false);
         for event in &completed_events {
@@ -7115,23 +5801,17 @@ mod tests {
 
         let scope = effective_replace_words(&buffer, 2, CorrectionEngine::Smart, true);
         let (events, backspaces) = buffer.what_to_replay(scope).expect("last word tail");
-        let left = map_original_events(&completed_events);
+        let decision = replay_layout_decision(&events);
         let current_original = map_original_events(&current_events);
         let current_target = map_events_to_layout(&current_events, true);
 
-        assert_eq!(scope, 2);
+        assert_eq!(scope, 1);
+        assert_eq!(map_original_events(&events), format!("{current_original} "));
         assert_eq!(
-            map_original_events(&events),
-            format!("{left} {current_original} ")
+            map_events_to_layout(&events, decision.target_is_ru),
+            format!("{current_target} ")
         );
-        assert_eq!(
-            decide_scoped_tail_correction(&events),
-            Some(format!("{left} {current_target} "))
-        );
-        assert_eq!(
-            backspaces,
-            (left.chars().count() + 1 + current_original.chars().count() + 1) as u32
-        );
+        assert_eq!(backspaces, current_original.chars().count() as u32 + 1);
     }
 
     #[test]
@@ -7226,43 +5906,6 @@ mod tests {
         assert_eq!(undo_backspaces, 9);
         assert!(!undo_decision.target_is_ru);
         assert_eq!(map_events_to_layout(&undo_events, false), "rjrf-rjke");
-        assert!(buffer.replay_toggle_ready());
-    }
-
-    #[test]
-    fn scoped_tail_repairs_mixed_cyrillic_prefix_ascii_hyphen_dative_word() {
-        let mut buffer = WordBuffer::new();
-        push_text_as_layout(&mut buffer, "Иракскую", true);
-        buffer.handle_space();
-        buffer.push(text_key_event('к', true));
-        for ch in "jrf-rjkt".chars() {
-            buffer.push(text_key_event(ch, false));
-        }
-
-        let (events, _) = buffer.what_to_replay(2).expect("two-word tail");
-        let original = map_original_events(&events);
-        let replacement = decide_scoped_tail_correction(&events).expect("smart replacement");
-        let plan = plan_text_replacement(&original, &replacement).expect("minimal plan");
-
-        assert_eq!(original, "Иракскую кjrf-rjkt");
-        assert_eq!(replacement, "Иракскую кока-коле");
-        assert_eq!(
-            plan,
-            TextReplacement {
-                move_left: 0,
-                backspaces: 8,
-                insert: "ока-коле".to_string(),
-                move_right: 0,
-            }
-        );
-        assert!(buffer.remember_replacement_last_word_for_replay(&events, &plan, &replacement));
-
-        let (undo_events, undo_backspaces) = buffer.what_to_replay(2).expect("undo tail");
-        let undo_decision = replay_layout_decision(&undo_events);
-        assert_eq!(map_original_events(&undo_events), "кока-коле");
-        assert_eq!(undo_backspaces, 9);
-        assert!(!undo_decision.target_is_ru);
-        assert_eq!(map_events_to_layout(&undo_events, false), "rjrf-rjkt");
         assert!(buffer.replay_toggle_ready());
     }
 
@@ -7420,89 +6063,6 @@ mod tests {
         assert_eq!(
             decide_scoped_tail_correction(&events),
             Some("проверка в Double".to_string())
-        );
-    }
-
-    #[test]
-    fn scoped_tail_uses_lem_for_three_word_mixed_tail() {
-        let mut buffer = WordBuffer::new();
-        push_text_as_layout(&mut buffer, "good", false);
-        buffer.handle_space();
-        for ch in "ghbdtn".chars() {
-            buffer.push(text_key_event(ch, false));
-        }
-        buffer.handle_space();
-        for ch in "ntrcn".chars() {
-            buffer.push(text_key_event(ch, false));
-        }
-
-        let (events, _) = buffer.what_to_replay(3).expect("three-word tail");
-        assert_eq!(map_original_events(&events), "good ghbdtn ntrcn");
-        assert_eq!(
-            decide_scoped_tail_correction(&events),
-            Some("good привет текст".to_string())
-        );
-    }
-
-    #[test]
-    fn scoped_tail_uses_lem_for_two_word_mixed_tail() {
-        let mut buffer = WordBuffer::new();
-        push_text_as_layout(&mut buffer, "good", false);
-        buffer.handle_space();
-        for ch in "ntrcn".chars() {
-            buffer.push(text_key_event(ch, false));
-        }
-
-        let (events, _) = buffer.what_to_replay(2).expect("two-word tail");
-        let words = split_event_words(&events).expect("split words");
-        let ranked = lay::lem::rank_candidates(
-            &map_original_events(&events),
-            scoped_tail_lem_candidates(&words, true),
-        );
-
-        assert_eq!(map_original_events(&events), "good ntrcn");
-        assert_eq!(ranked[0].text, "good текст");
-        assert_eq!(
-            decide_scoped_tail_correction_with_lem(&events, true),
-            Some("good текст".to_string())
-        );
-    }
-
-    #[test]
-    fn scoped_tail_converts_apostrophe_layout_word_as_letter() {
-        let mut buffer = WordBuffer::new();
-        push_text_as_layout(&mut buffer, "'nj", false);
-        buffer.handle_space();
-        push_text_as_layout(&mut buffer, "ckjdj", false);
-
-        let (events, _) = buffer.what_to_replay(2).expect("two-word tail");
-        let original = map_original_events(&events);
-
-        assert_eq!(original, "'nj ckjdj");
-        assert_eq!(
-            decide_scoped_tail_correction_with_lem(&events, true),
-            Some("это слово".to_string())
-        );
-    }
-
-    #[test]
-    fn scoped_tail_handles_three_completed_words_with_typo() {
-        let mut buffer = WordBuffer::new();
-        push_text_as_layout(&mut buffer, "ljgecntv", false);
-        buffer.handle_space();
-        push_text_as_layout(&mut buffer, ",ele", false);
-        buffer.handle_space();
-        push_text_as_layout(&mut buffer, "ошибатся", true);
-        buffer.handle_space();
-
-        let scope = effective_replace_words(&buffer, 3, CorrectionEngine::Smart, true);
-        let (events, _) = buffer.what_to_replay(scope).expect("three-word tail");
-
-        assert_eq!(scope, 3);
-        assert_eq!(map_original_events(&events), "ljgecntv ,ele ошибатся ");
-        assert_eq!(
-            decide_scoped_tail_correction_with_lem(&events, true),
-            Some("допустем буду ошибаться ".to_string())
         );
     }
 
@@ -7749,23 +6309,6 @@ mod tests {
                 insert: String::new(),
                 move_right: 6,
             })
-        );
-    }
-
-    #[test]
-    fn pending_auto_undo_restores_full_original_text() {
-        let mut buffer = WordBuffer::new();
-        buffer.remember_pending_auto_undo("typing-assist", "15р-16р ", "15h-16h ", 1, 1);
-
-        let undo = buffer.take_pending_auto_undo().expect("pending undo");
-        assert_eq!(
-            pending_auto_undo_plan(&undo),
-            TextReplacement {
-                move_left: 0,
-                backspaces: 8,
-                insert: "15р-16р ".to_string(),
-                move_right: 0,
-            }
         );
     }
 
@@ -8024,16 +6567,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_gdbus_bool_tuple() {
-        assert_eq!(parse_gdbus_bool("(true,)"), Some(true));
-        assert_eq!(parse_gdbus_bool("(false,)"), Some(false));
-        assert_eq!(parse_gdbus_bool("true"), None);
-    }
-
-    #[test]
     fn keeps_only_last_jsonl_lines() {
         let compacted = keep_last_jsonl_lines("a\nb\nc\nd\n", 2);
         assert_eq!(compacted, "c\nd\n");
+    }
+
+    #[test]
+    fn does_not_glue_single_letter_function_word_to_previous() {
+        // Регрессия для бага: "привет и" не должно становиться "привети".
+        // Проверяем что correct_split_word_pair НЕ срабатывает на короткое
+        // союзное/предложное правое слово.
+        assert_eq!(correct_split_word_pair("привет и"), None);
+        assert_eq!(correct_split_word_pair("привет я"), None);
+        assert_eq!(correct_split_word_pair("работа а"), None);
+        assert_eq!(correct_split_word_pair("дома в"), None);
+        assert_eq!(correct_split_word_pair("мама с"), None);
+        assert_eq!(correct_split_word_pair("Привет И"), None);
     }
 
     #[test]
@@ -8066,8 +6615,6 @@ mod tests {
         assert!(is_known_russian_word_or_form("помогу"));
         assert!(is_known_russian_word_or_form("видишь"));
         assert!(is_known_russian_word_or_form("значит"));
-        assert!(is_known_russian_word_or_form("страдает"));
-        assert!(is_known_russian_word_or_form("установки"));
     }
 
     #[test]
@@ -8078,36 +6625,9 @@ mod tests {
         );
         assert_eq!(apply_typing_assist("yt ", true), Some("не ".to_string()));
         assert_eq!(
-            apply_typing_assist("double b ", true),
-            Some("double и ".to_string())
-        );
-        assert_eq!(
-            apply_typing_assist_to_text_tail("посмотри я double b "),
-            Some("посмотри я double и ".to_string())
-        );
-        assert_eq!(
             apply_typing_assist("hf,jnftn ", true),
             Some("работает ".to_string())
         );
-        assert_eq!(apply_typing_assist("'nj ", true), Some("это ".to_string()));
-        assert_eq!(
-            apply_typing_assist("ашдуы ", true),
-            Some("files ".to_string())
-        );
-        assert_eq!(
-            apply_typing_assist("еукьштфд ", true),
-            Some("terminal ".to_string())
-        );
-        assert_eq!(
-            apply_typing_assist("неукьштфд ", true),
-            Some("terminal ".to_string())
-        );
-        assert_eq!(
-            apply_typing_assist("Lfdfq ", true),
-            Some("Давай ".to_string())
-        );
-        assert_eq!(apply_typing_assist("кгы ", true), Some("rus ".to_string()));
-        assert_eq!(apply_typing_assist("утп ", true), Some("eng ".to_string()));
         assert_eq!(
             apply_typing_assist("njkmrj ", false),
             None,
@@ -8116,235 +6636,13 @@ mod tests {
     }
 
     #[test]
-    fn typing_assist_auto_replace_off_keeps_layout_only_rules() {
-        let pipeline =
-            typing_assist_pipeline_for_auto_replace(false, &default_typing_assist_pipeline());
-
-        assert_eq!(
-            apply_typing_assist_with_pipeline("кгы ", true, &pipeline),
-            Some("rus ".to_string())
-        );
-        assert_eq!(
-            apply_typing_assist_with_pipeline("утп ", true, &pipeline),
-            Some("eng ".to_string())
-        );
-        assert_eq!(
-            apply_typing_assist_with_pipeline("njkmrj ", true, &pipeline),
-            Some("только ".to_string())
-        );
-        assert_eq!(
-            apply_typing_assist_with_pipeline("прорватся ", false, &pipeline),
-            None
-        );
-        assert_eq!(
-            apply_typing_assist_with_pipeline("фактческим ", false, &pipeline),
-            None
-        );
-    }
-
-    #[test]
-    fn typing_assist_prefers_reflexive_verb_fix_over_extra_letter_guess() {
-        assert_eq!(correct_extra_letters("прорватся"), None);
-        assert_eq!(
-            apply_typing_assist("прорватся ", false),
-            Some("прорваться ".to_string())
-        );
-        assert_eq!(
-            apply_typing_assist("ошибатся ", false),
-            Some("ошибаться ".to_string())
-        );
-    }
-
-    #[test]
     fn typing_assist_auto_switch_keeps_english_and_protected_ascii() {
         assert_eq!(apply_typing_assist("hello ", true), None);
         assert_eq!(apply_typing_assist("test ", true), None);
         assert_eq!(apply_typing_assist("good ", true), None);
-        assert_eq!(apply_typing_assist("три ", true), None);
-        assert_eq!(apply_typing_assist("раскладок ", true), None);
         assert_eq!(apply_typing_assist("API ", true), None);
         assert_eq!(apply_typing_assist("AmoCRM ", true), None);
         assert_eq!(apply_typing_assist("wi-fi ", true), None);
-    }
-
-    #[test]
-    fn typing_assist_pipeline_can_disable_rules() {
-        let no_en_to_ru = typing_pipeline_with_disabled(&["layout_en_to_ru"]);
-        assert_eq!(
-            apply_typing_assist_with_pipeline("njkmrj ", true, &no_en_to_ru),
-            None
-        );
-
-        let no_ru_to_en = typing_pipeline_with_disabled(&["layout_ru_to_en"]);
-        assert_eq!(
-            apply_typing_assist_with_pipeline("ашдуы ", true, &no_ru_to_en),
-            None
-        );
-
-        let no_hard_sign = typing_pipeline_with_disabled(&["hard_sign"]);
-        assert_eq!(
-            apply_typing_assist_with_pipeline("Обьясни ", false, &no_hard_sign),
-            None
-        );
-    }
-
-    #[test]
-    fn typing_assist_pipeline_priority_changes_first_match() {
-        let personal_first = typing_pipeline_with_first("personal_phrase");
-        let normalized = normalize_typing_assist_pipeline(&personal_first);
-        assert_eq!(normalized[0].id, "personal_phrase");
-        assert_eq!(normalized[0].priority, 1);
-    }
-
-    #[test]
-    fn typing_assist_each_default_rule_has_isolated_positive_case() {
-        struct Case {
-            id: &'static str,
-            input: String,
-            expected: String,
-            allow_layout_auto: bool,
-        }
-
-        let technical_ascii =
-            map_events_to_layout(&key_events(&ascii_hyphen_token_keycodes(), false), false);
-        let technical_cyrillic = lay::dict::convert(&technical_ascii, lay::dict::Direction::Us2Ru);
-        let prefix_cyrillic = map_events_to_layout(&[key_event(KeyCode::KEY_W, true)], true);
-
-        let cases = [
-            Case {
-                id: "moved_prefix_pair",
-                input: "расчет ыприблизительные ".to_string(),
-                expected: "расчеты приблизительные ".to_string(),
-                allow_layout_auto: false,
-            },
-            Case {
-                id: "split_word_pair",
-                input: "я вно ".to_string(),
-                expected: "явно ".to_string(),
-                allow_layout_auto: false,
-            },
-            Case {
-                id: "visual_b",
-                input: "слово b ".to_string(),
-                expected: "слово в ".to_string(),
-                allow_layout_auto: false,
-            },
-            Case {
-                id: "personal_phrase",
-                input: "нуда ".to_string(),
-                expected: "ну да ".to_string(),
-                allow_layout_auto: false,
-            },
-            Case {
-                id: "personal_token",
-                input: "подлючись. ".to_string(),
-                expected: "подключись. ".to_string(),
-                allow_layout_auto: false,
-            },
-            Case {
-                id: "duplicate_layout_prefix",
-                input: format!("{prefix_cyrillic}{technical_ascii} "),
-                expected: format!("{technical_ascii} "),
-                allow_layout_auto: false,
-            },
-            Case {
-                id: "layout_technical",
-                input: format!("{technical_cyrillic} "),
-                expected: format!("{technical_ascii} "),
-                allow_layout_auto: false,
-            },
-            Case {
-                id: "layout_ru_to_en",
-                input: "ашдуы ".to_string(),
-                expected: "files ".to_string(),
-                allow_layout_auto: true,
-            },
-            Case {
-                id: "layout_en_to_ru",
-                input: "njkmrj ".to_string(),
-                expected: "только ".to_string(),
-                allow_layout_auto: true,
-            },
-            Case {
-                id: "cyrillic_case",
-                input: "МОжно ".to_string(),
-                expected: "Можно ".to_string(),
-                allow_layout_auto: false,
-            },
-            Case {
-                id: "hard_sign",
-                input: "Обьясни ".to_string(),
-                expected: "Объясни ".to_string(),
-                allow_layout_auto: false,
-            },
-            Case {
-                id: "adjacent_transposition",
-                input: "рабоатет ".to_string(),
-                expected: "работает ".to_string(),
-                allow_layout_auto: false,
-            },
-            Case {
-                id: "repeated_letter",
-                input: "исправленно ".to_string(),
-                expected: "исправлено ".to_string(),
-                allow_layout_auto: false,
-            },
-            Case {
-                id: "single_letter_substitution",
-                input: "плозо ".to_string(),
-                expected: "плохо ".to_string(),
-                allow_layout_auto: false,
-            },
-            Case {
-                id: "verb_ending",
-                input: "прорватся ".to_string(),
-                expected: "прорваться ".to_string(),
-                allow_layout_auto: false,
-            },
-            Case {
-                id: "vowel_confusion",
-                input: "помагу ".to_string(),
-                expected: "помогу ".to_string(),
-                allow_layout_auto: false,
-            },
-            Case {
-                id: "extra_letters",
-                input: "кнокопками ".to_string(),
-                expected: "кнопками ".to_string(),
-                allow_layout_auto: false,
-            },
-            Case {
-                id: "missing_letter",
-                input: "фактческим ".to_string(),
-                expected: "фактическим ".to_string(),
-                allow_layout_auto: false,
-            },
-            Case {
-                id: "glued_phrase",
-                input: "когдая ".to_string(),
-                expected: "когда я ".to_string(),
-                allow_layout_auto: false,
-            },
-        ];
-
-        let mut covered = HashSet::new();
-        for case in cases {
-            let pipeline = typing_pipeline_with_only(case.id);
-            assert_eq!(
-                apply_typing_assist_with_pipeline(&case.input, case.allow_layout_auto, &pipeline),
-                Some(case.expected),
-                "rule={} input={:?}",
-                case.id,
-                case.input
-            );
-            covered.insert(case.id);
-        }
-
-        let expected: HashSet<&str> = DEFAULT_TYPING_ASSIST_RULES
-            .iter()
-            .map(|(id, _)| *id)
-            .collect();
-        assert_eq!(covered, expected);
     }
 
     #[test]
@@ -8474,56 +6772,12 @@ mod tests {
             Some("явно ".to_string())
         );
         assert_eq!(
-            apply_typing_assist_exact("тако й "),
-            Some("такой ".to_string())
-        );
-        assert_eq!(
             apply_typing_assist_exact("Я вно, "),
             Some("Явно, ".to_string())
         );
         assert_eq!(apply_typing_assist_exact("я тут "), None);
         assert_eq!(apply_typing_assist_exact("чтобы точно "), None);
         assert_eq!(apply_typing_assist_exact("хо хо "), None);
-    }
-
-    #[test]
-    fn typing_assist_splits_accidentally_glued_words() {
-        assert_eq!(
-            apply_typing_assist_exact("ятут "),
-            Some("я тут ".to_string())
-        );
-        assert_eq!(
-            apply_typing_assist_exact("чтобыточно "),
-            Some("чтобы точно ".to_string())
-        );
-        assert_eq!(
-            apply_typing_assist_exact("когдая "),
-            Some("когда я ".to_string())
-        );
-        assert_eq!(
-            apply_typing_assist_exact("еслия "),
-            Some("если я ".to_string())
-        );
-        assert_eq!(
-            apply_typing_assist_exact("тогдая "),
-            Some("тогда я ".to_string())
-        );
-        assert_eq!(
-            apply_typing_assist_exact("можноя "),
-            Some("можно я ".to_string())
-        );
-        assert_eq!(
-            apply_typing_assist_exact("будуя "),
-            Some("буду я ".to_string())
-        );
-        assert_eq!(apply_typing_assist_exact("машина "), None);
-        assert_eq!(apply_typing_assist_exact("земля "), None);
-        assert_eq!(apply_typing_assist_exact("какая "), None);
-        assert_eq!(apply_typing_assist_exact("статья "), None);
-        assert_eq!(apply_typing_assist_exact("семья "), None);
-        assert_eq!(apply_typing_assist_exact("идея "), None);
-        assert_eq!(apply_typing_assist_exact("синяя "), None);
-        assert_eq!(apply_typing_assist_exact("пошли "), None);
     }
 
     #[test]
@@ -8539,10 +6793,6 @@ mod tests {
         assert_eq!(
             apply_typing_assist_exact("расчет ыприблизительные "),
             Some("расчеты приблизительные ".to_string())
-        );
-        assert_eq!(
-            apply_typing_assist_exact("дл япроверки "),
-            Some("для проверки ".to_string())
         );
         assert_eq!(
             apply_typing_assist_to_text_tail("все расчет ыприблизительные "),
@@ -8640,19 +6890,11 @@ mod tests {
         assert_eq!(apply_typing_assist_exact("плохо "), None);
         assert_eq!(apply_typing_assist_exact("правильно "), None);
         assert_eq!(apply_typing_assist_exact("исправляет "), None);
-        assert_eq!(apply_typing_assist_exact("начинаю "), None);
         assert_eq!(apply_typing_assist_exact("удаляется "), None);
         assert_eq!(apply_typing_assist_exact("удателятеся "), None);
         assert_eq!(apply_typing_assist_exact("еще "), None);
         assert_eq!(apply_typing_assist_exact("елка "), None);
         assert_eq!(apply_typing_assist_exact("все "), None);
-        assert_eq!(apply_typing_assist_exact("раскладок "), None);
-        assert_eq!(apply_typing_assist_exact("кнопок "), None);
-        assert_eq!(apply_typing_assist_exact("тестами "), None);
-        assert_eq!(apply_typing_assist_exact("словами "), None);
-        assert_eq!(apply_typing_assist_exact("вариантами "), None);
-        assert_eq!(apply_typing_assist_exact("страдает "), None);
-        assert_eq!(apply_typing_assist_exact("установки "), None);
     }
 
     #[test]
@@ -8757,7 +6999,6 @@ mod tests {
             "помощник ",
             "клавиатура ",
             "раскладка ",
-            "раскладок ",
             "буфер ",
             "пробел ",
             "сейчас ",
@@ -8818,9 +7059,6 @@ mod tests {
             "в вот ",
             "машина ",
             "магазин ",
-            "тестами ",
-            "словами ",
-            "вариантами ",
             "схеме таможенник ",
             "схема таможженик ",
             "пошли ",
@@ -8854,11 +7092,6 @@ mod tests {
             ("слово b ", "слово и ", "слово в "),
             ("b vfufpby ", "и магазин ", "в магазин "),
             ("b djn", "и вот", "в вот"),
-            (
-                "посмотри я double b",
-                "gjcvjnhb z вщгиду и",
-                "посмотри я double и",
-            ),
         ];
 
         for (original, target, expected) in cases {

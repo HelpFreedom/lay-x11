@@ -1,5 +1,4 @@
 /target
-/SKILL.md
 *.deb
 *.log
 *.jsonl
@@ -8,7 +7,8 @@ __pycache__/
 .env.*
 /dist
 /models
-/corpus/*.txt
-/corpus/*.arpa
-/corpus/*.bin
-/corpus/*.model
+
+# Локальные настройки Claude Code / IDE
+/.claude
+/.idea
+/.vscode

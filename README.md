@@ -1,526 +1,214 @@
-<div align="center">
+# lay (X11)
 
-# lay
+**Punto/Caramba-style переключатель раскладки для Linux X11.**
+Печатаешь не той раскладкой? Жмёшь Shift→Shift — последнее слово
+перепечатывается правильно, раскладка системы переключается.
 
-**Спасатель неправильной RU/EN раскладки для Linux**
+Форк [radislabus-star/lay-public](https://github.com/radislabus-star/lay-public)
+для X11. Оригинал работает только на GNOME Wayland (требует GNOME Shell extension).
+Эта версия — pure Rust, без зависимости от GNOME/Wayland, работает на любом
+X11-окружении: **DWM, i3, Openbox, KDE/X11, XFCE, Cinnamon, MATE**.
 
-**Double Shift RU/EN layout rescue for Linux desktops**
+## Что делает
 
-Напечатал слово не в той раскладке? Нажми **Shift два раза** и продолжай писать.
+- **Двойной Shift** → перепечатывает последнее слово в другой раскладке и
+  переключает её. Работает в чате, браузере, терминале, sandbox-приложениях
+  (Flatpak/Snap) — потому что слушает клавиатуру через `/dev/input/event*` и
+  печатает через `uinput`, минуя X.
+- **Помощь при наборе** (опционально) — после пробела сам исправляет слово,
+  если уверен (по словарю `replacements.json` + n-gram scorer + hunspell-ru).
+  Например: `ghbdtn ` → `привет `, `wifi ` → `Wi-Fi `, `вобще ` → `вообще `.
+- **Точные замены брендов/терминов** — `wifi → Wi-Fi`, `github → GitHub`,
+  `вобщем → в общем`. Список в `~/.config/lay/replacements.json`.
+- **Список «не трогать»** — `~/.config/lay/no_replace.txt`. Команды терминала
+  (`cd`, `ls`, `git`) и твои алиасы никогда не подменяются.
+- **Runtime-переключение авто-режима** жестом `Shift→Ctrl→Shift→Shift`.
+  По умолчанию (после reboot) — базовый режим без авто-исправлений. Сделал жест
+  → включились все три авто-опции (typing_assist, auto_replace, auto_switch_layout).
+  Сделал ещё раз — выключились. Конфиг при этом не меняется.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/radislabus-star/lay-public/main/scripts/install-remote.sh | bash
-```
+## Что изменено относительно оригинала
 
-[![Rust](https://img.shields.io/badge/Rust-1.75+-orange?logo=rust)](https://www.rust-lang.org/)
-[![GNOME](https://img.shields.io/badge/GNOME-45--47%2C%2050-4A86CF?logo=gnome)](https://gnome.org/)
-[![Wayland](https://img.shields.io/badge/Wayland-native-blue)](https://wayland.freedesktop.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green)](#license)
+| | Оригинал ([lay-public](https://github.com/radislabus-star/lay-public)) | Этот форк |
+|---|---|---|
+| Платформа | GNOME Wayland | **Любой X11 WM** |
+| Переключение раскладки | DBus → GNOME Shell extension → `inputSources[i].activate()` | **`XkbLockGroup` через x11rb** (синхронно, без FFI) |
+| Чтение текущей раскладки | DBus → extension | **`XkbGetState`** |
+| Fallback ввод текста | DBus → Clutter virtual device / `inputMethod.commit()` | `xdotool type` (опционально, обычно не нужен) |
+| ibus engine sync | `ibus engine xkb:ru::rus` | удалено |
+| Tray UI | GNOME Shell extension (~800 строк JS) | удалено — конфиг через `~/.config/lay/*.json` |
+| LLM smart-режим | Ollama / direct GGUF | удалён (стаб); replay-путь работает |
+| Зависимости | `zbus`, `llama_cpp`, GNOME 45–50 | **только `x11rb`** (pure Rust) |
+| Runtime-флаги авто-режима | через tray menu, пишется в config | **жестом Shift→Ctrl→Shift→Shift, в памяти; reboot сбрасывает** |
+| Protection list для команд | нет | **`no_replace.txt`** — `cd`/`ls`/`git`/алиасы не трогаются |
+| `correct_split_word_pair` глюк | «привет и» → «привети» (баг suffix-эвристики) | **исправлено**: одиночные служебные буквы (и, я, а, в, к, с, у, о, ю) не приклеиваются |
 
-</div>
+Сохранены без изменений: WordBuffer, FSM двойного Shift, словарь QWERTY↔ЙЦУКЕН,
+ngram scorer, эвристики исправлений, learning log с pending-feedback, точные
+замены.
 
-## Русский
+## Установка
 
-### Зачем появился lay
-
-На Windows я привык к Caramba Switcher. Это была одна из тех маленьких утилит,
-которые почти не замечаешь, пока они есть: набрал слово не в той раскладке,
-нажал привычную горячую клавишу, слово перевернулось, можно писать дальше.
-
-После перехода на Linux я ожидал найти что-то такое же простое. Нашёл несколько
-похожих проектов, но одни выглядели устаревшими, другие не работали в моём
-GNOME Wayland окружении, третьи решали задачу не так, как мне хотелось. Мне
-нужно было не большое приложение-автокорректор, а один конкретный рефлекс:
-нажал Shift два раза — последнее слово перепечаталось в другой раскладке.
-
-Я не нашёл готовую утилиту, которая делала бы это достаточно стабильно, поэтому
-написал свою.
-
-Делал для себя и делюсь с миром. Если тебе тоже нужно лёгкое исправление слов
-по двойному Shift — бери, пробуй, присылай короткие воспроизводимые баги.
-
-`lay` — маленький клавиатурный помощник для Linux-пользователей, которые часто
-пишут в двух раскладках, прежде всего **русской и английской**.
-
-Главный сценарий простой:
-
-```text
-Напечатал: Ghbdtn
-Нажал:     Shift Shift
-Получил:   Привет
-```
-
-![lay demo](docs/publicity/demo.gif)
-
-`lay` не пытается “угадать всё за тебя”. Базовое поведение ручное и
-предсказуемое: ошибся раскладкой, нажал двойной Shift, последнее слово
-перепечаталось в другой раскладке.
-
-Основная проверенная среда сейчас **GNOME Wayland**. Внутри: Rust, evdev/uinput
-и backend-слой для переключения раскладки. GNOME backend использует маленькое
-расширение GNOME Shell; KDE и X11 backend добавлены как экспериментальные.
-
-### Возможности
-
-- Двойной Shift исправляет последнее слово, набранное не в той раскладке.
-- Работает прямо в приложениях, без копирования текста через буфер обмена.
-- Поддерживает GNOME Wayland через маленькое Shell-расширение.
-- Имеет экспериментальные backend-режимы для KDE и X11.
-- Есть быстрый CLI для конвертации текста из терминала.
-- Есть аккуратная помощь при наборе после пробела.
-- Есть точная автоподмена по пользовательскому словарю.
-- Есть режим `ptah_alexs`: жёсткая привязка раскладки к выбранным окнам.
-- Основной режим локальный: без облака, без сетевых запросов и без модели.
-
-### Статус
-
-Это ранняя публичная beta-версия.
-
-Основная проверенная среда: Ubuntu/GNOME Wayland с RU/EN раскладками.
-Расширение заявляет поддержку GNOME Shell 45, 46, 47 и 50.
-
-KDE и X11 backend появились после обсуждения на Linux.org.ru и пока считаются
-экспериментальными:
-
-- `layout_backend = "gnome"`: GNOME Shell extension + DBus bridge.
-- `layout_backend = "kde"`: `qdbus/qdbus6 org.kde.keyboard /Layouts setLayout`.
-- `layout_backend = "x11"`: `xkb-switch`, `xkblayout-state` или fallback
-  `setxkbmap`.
-
-Другие версии GNOME, дистрибутивы, Sway, Hyprland и раскладки кроме RU/EN могут
-потребовать доработок.
-
-Если присылаешь баг-репорт или пример набора, сначала убери приватный текст.
-
-### Установка
-
-Обычная установка ставит всё сразу: Rust-бинарники, user systemd-сервис
-`lay-daemon` и GNOME Shell extension.
-
-Короткая установка одной командой:
+### Зависимости системы
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/radislabus-star/lay-public/main/scripts/install-remote.sh | bash
+sudo apt install hunspell-ru     # для распознавания русских слов в typing-assist
+sudo apt install xdotool         # опционально, fallback ввод
+sudo usermod -aG input $USER     # для чтения /dev/input/event*
+# перелогинься чтобы группа применилась
 ```
 
-Она поставит базовые зависимости, Rust, скачает `lay` в `~/projects/lay` и
-запустит `install.sh`.
-
-Ручной вариант:
+### Сборка и установка
 
 ```bash
-git clone https://github.com/radislabus-star/lay-public.git ~/projects/lay
-cd ~/projects/lay
-bash install.sh
+git clone https://github.com/HelpFreedom/lay-x11
+cd lay-x11
+./install.sh
 ```
 
-После установки выйди из сессии и зайди снова. Это нужно, чтобы применились
-группа `input` и расширение GNOME.
+`install.sh`:
+- собирает release-бинарники (~2 МБ суммарно),
+- ставит симлинки `~/.local/bin/{lay,lay-daemon}`,
+- кладёт systemd-юнит в `~/.config/systemd/user/lay-daemon.service`,
+- копирует example-конфиги в `~/.config/lay/` (если их ещё нет).
 
-Потом набери слово не в той раскладке и нажми **Shift два раза**.
-
-### Обновление
-
-Если `lay` установлен из git-копии, обновление одной командой:
+### Запуск daemon
 
 ```bash
-cd ~/projects/lay
-bash update.sh
+systemctl --user enable --now lay-daemon
+journalctl --user -u lay-daemon -f       # смотреть лог
 ```
 
-Скрипт делает `git pull --ff-only`, пересобирает release-бинарники, обновляет
-GNOME extension и перезапускает `lay-daemon`.
-
-### Extension ZIP
-
-Для ручной установки GNOME-расширения или отправки на extensions.gnome.org можно
-собрать ZIP:
-
+Или в форграунде для отладки:
 ```bash
-bash scripts/package-extension.sh
+DISPLAY=:0 LAY_DEBUG_LOG=1 ~/.local/bin/lay-daemon
 ```
 
-Архив появится в:
-
-```text
-dist/gnome-extension/lay@radislabus-star.github.io-<version>.zip
-```
-
-Установить только расширение можно так:
-
-```bash
-gnome-extensions install --force dist/gnome-extension/lay@radislabus-star.github.io-<version>.zip
-gnome-extensions enable lay@radislabus-star.github.io
-```
-
-Но для полной работы double Shift всё равно нужен `lay-daemon`, поэтому для
-обычных пользователей предпочтителен `bash install.sh`.
-
-### Требования
-
-- Linux
-- GNOME Shell 45, 46, 47 или 50
-- Wayland-сессия
-- Rust 1.75+
-- доступ к `/dev/input` через группу `input`
-- поддержка `uinput`
-
-Для экспериментального KDE backend нужен `qdbus` или `qdbus6`. Для
-экспериментального X11 backend лучше иметь `xkb-switch`; без него используется
-fallback через `setxkbmap`, который может менять текущую XKB-конфигурацию
-грубее, чем специализированные tools.
-
-Установщик может добавить текущего пользователя в группу `input`, но это
-начинает работать только после нового входа в систему.
+## Использование
 
 ### CLI
 
-`lay` можно использовать и из терминала:
-
 ```bash
-lay "Ye djn ghbvth"
-# Ну вот пример
-
-lay "руддщ цщкдв"
-# hello world
-
-echo "ghbdtn" | lay
-# привет
-
-lay --clipboard
+lay "Ye djn ghbvth"           # → Ну вот пример
+lay "руддщ цщкдв"             # → hello world
+lay --clipboard               # конвертирует то, что в буфере
+echo "ghbdtn" | lay           # → привет
 ```
 
-CLI удобен для быстрых проверок, скриптов и конвертации буфера обмена.
+### Daemon
 
-### Демон
+- **Двойной Shift** (по умолчанию) — перепечатать последнее слово в другой раскладке.
+  Настраивается в `~/.config/lay/config.json` — `double-ctrl`, `double-alt`,
+  `caps-lock`, `single-rshift`, `single-rctrl`, `single-ralt`, `single-pause`.
+- **Жест `Shift → Ctrl → Shift → Shift`** (4 тапа в течение ~3 сек) — включить/выключить
+  авто-режим. В журнале появляется `⚙ AUTO ON` / `⚙ AUTO OFF`.
 
-`lay-daemon` — фоновый сервис, который делает двойной Shift рабочим в обычных
-приложениях.
+### Конфиг
 
-Полезные команды:
-
-```bash
-systemctl --user status lay-daemon --no-pager
-systemctl --user restart lay-daemon
-systemctl --user stop lay-daemon
-journalctl --user -u lay-daemon -n 120 --no-pager
-```
-
-### GNOME-расширение
-
-Демон читает физические клавиши и перепроигрывает keycode-события, но на GNOME
-Wayland переключение раскладки требует интеграции с GNOME Shell.
-
-Исходники расширения:
-
-```text
-extension/lay@radislabus-star.github.io/
-```
-
-Установленная копия:
-
-```text
-~/.local/share/gnome-shell/extensions/lay@radislabus-star.github.io/
-```
-
-### Меню в трее
-
-Меню держит основной сценарий коротким:
-
-- `Помощь при наборе`: осторожная правка после пробела.
-- `Автоподмена`: точные пользовательские правила и typo-правки.
-- `Запоминать правки`: opt-in лог подтверждённых исправлений.
-- `Режим`: Replay или Smart.
-- `Область`: сколько слов брать для ручного double Shift.
-- `Арбитр`: LEM и auto-layout настройки.
-- `ptah_alexs`: жёсткая раскладка по окну.
-- `Коррекция`: включение/выключение слоёв помощника.
-- `Триггер`, `Тайминг`, `Daemon`, `О программе`: сервисные настройки.
-
-В публичном режиме нет кнопки для открытия сырого debug-лога.
-
-### Как это работает
-
-При двойном Shift:
-
-```text
-физическая клавиатура -> evdev -> lay-daemon
-                                  |
-                                  v
-                           буфер текущего слова
-                                  |
-                                  v
-                        Backspace x длина слова
-                                  |
-                                  v
-                 GNOME extension переключает раскладку
-                                  |
-                                  v
-                    uinput повторяет исходные keycode
-```
-
-То есть `lay` не вставляет “готовое слово” из облака или буфера. Он повторяет
-те же физические клавиши уже под другой раскладкой. Поэтому `Ghbdtn` становится
-`Привет`.
-
-### Помощь при наборе
-
-Дополнительно `lay` умеет после пробела запускать консервативный помощник.
-Это отдельная функция, не основной double-Shift сценарий.
-
-Помощник специально осторожный:
-
-- проверяет только завершённые слова;
-- исправляет только уверенные локальные ошибки;
-- использует точные правила, словари и char n-gram scorer;
-- не переписывает стиль и не генерирует новый текст;
-- если не уверен, ничего не делает.
-
-Примеры задуманных исправлений:
-
-```text
-ошисбя -> ошибся
-я вно  -> явно
-плозо  -> плохо
-```
-
-Включается и выключается в трее:
+`~/.config/lay/config.json`:
 
 ```json
 {
-  "typing_assist": true,
-  "auto_switch_layout": true
+  "trigger": "double-lshift",
+  "tap_max_ms": 200,
+  "shift_window_ms": 250,
+  "debounce_ms": 50,
+  "replace_words": 1
 }
 ```
 
-`auto_switch_layout` управляет автоматическими layout-правками после пробела:
-если слово уверенно похоже на набор в неправильной раскладке, helper заменит
-его и оставит активной раскладку исправленного текста. Ручной double Shift
-переключает раскладку всегда.
+В этом форке поля `typing_assist`, `auto_replace`, `auto_switch_layout`,
+`learning_log` **из конфига не читаются** — управляются только жестом.
 
-### Автоподмена
+### Свой словарь подмен
 
-Точные автоподмены лежат здесь:
-
-```text
-~/.config/lay/replacements.json
-```
-
-Пример:
+`~/.config/lay/replacements.json` — список «опечатка → правильно»:
 
 ```json
 {
-  "подлючись": "подключись",
-  "Надйи": "Найди"
+  "wifi": "Wi-Fi",
+  "github": "GitHub",
+  "вобщем": "в общем",
+  "потомучто": "потому что"
 }
 ```
 
-Это именно точные правила. Нечёткие исправления относятся к typing assist, а не
-к словарю автоподмены.
+После правки — рестарт daemon. Кейс умный: ключ `github` сработает и на `GitHub`/`GITHUB`.
 
-### Режим ptah_alexs
+### Список «не трогать»
 
-`ptah_alexs` — это не память последней раскладки окна. Это жёсткая политика:
-когда конкретное окно получает фокус, `lay` ставит назначенную раскладку.
+`~/.config/lay/no_replace.txt` — токены которые daemon **никогда** не подменяет
+и не переключает раскладку:
 
-Пример:
-
-```text
-Terminal -> EN
-Browser  -> не трогать
+```
+cd
+ls
+git
+nv         # твой алиас для nvim
+gp         # твой алиас
 ```
 
-Если терминал получил фокус, `lay` снова поставит EN, даже если раньше внутри
-него случайно включали RU. Правила задаются из трея: `ptah_alexs -> Текущее
-окно -> EN/RU/keep`.
+Один токен в строке, регистр игнорируется, `#` — комментарий. После правки —
+рестарт daemon.
 
-Конфиг хранится локально:
+## Архитектура
 
-```json
-{
-  "ptah_alexs_mode": true,
-  "ptah_alexs_rules": [
-    {"kind": "app_id", "value": "org.gnome.Terminal.desktop", "layout": "us", "label": "Terminal"}
-  ]
-}
+```
+physical keyboard
+  └── /dev/input/event*  (evdev)
+       └── lay-daemon
+            ├── WordBuffer            (буфер физических нажатий)
+            ├── DShiftState FSM       (детектор двойного Shift)
+            ├── GestureState FSM      (детектор Shift→Ctrl→Shift→Shift)
+            ├── typing-assist         (после пробела, optional)
+            ├── uinput Backspace + replay
+            └── x11_layout::lock_group(group)   ← XkbLockGroup (синхронный)
 ```
 
-### Приватность
+Слой X11 в `src/x11_layout.rs` (~130 строк):
+- `XkbLockGroup` — переключение группы раскладки
+- `XkbGetState` — чтение активной группы
+- `XTest fake_input` — эмуляция клавиш (для fallback)
 
-К клавиатурным инструментам нужно относиться подозрительно. `lay-daemon` видит
-клавиатурные события, поэтому модель данных сделана максимально скучной и
-локальной.
+Через `x11rb` (pure Rust, без libxcb-FFI). Бинарь зависит только от libc и
+системного X-сервера.
 
-По умолчанию `lay` никуда не отправляет набранный текст. Нормальный путь
-double Shift не требует сети, облачных API или удалённой модели.
+## Размер
 
-Опциональный learning log локальный. Он должен хранить пары подтверждённых
-исправлений, а не полный поток набора. По умолчанию он выключен и включается в
-трее через `Данные -> Запоминать правки`:
+| Бинарь | Размер | Зависимости |
+|---|---|---|
+| `lay` | ~800 КБ | clipboard, dict |
+| `lay-daemon` | ~1.2 МБ | evdev, uinput, x11rb |
 
-```text
-~/.local/share/lay/corrections.jsonl
-```
-
-Диагностический вывод тоже выключен по умолчанию. Разработчик может включить
-его явно через `lay-daemon --debug-log` или `LAY_DEBUG_LOG=1`.
-
-GNOME-расширение публикует session-local DBus bridge, чтобы `lay-daemon` мог
-переключать раскладку и делать fallback-вставку текста. Это не является
-security boundary против других процессов того же desktop-пользователя.
-
-Остановить демон можно в любой момент:
+## Тесты
 
 ```bash
-systemctl --user stop lay-daemon
+cargo test --release --bin lay-daemon
 ```
 
-### Smart/LLM режим
+В X11-форке 78 тестов проходят. 12 падают — это тесты оригинала, которые
+ожидают рабочий LLM-арбитр; в этом форке LLM стабнут.
 
-Есть экспериментальный `--smart` режим, где локальная модель может быть
-арбитром между уже подготовленными кандидатами.
+## Известные ограничения
 
-Это не главный путь продукта, не обязательная часть double Shift и не включено
-для обычного исправления раскладки.
+- **Только RU↔EN.** Чтобы добавить UK/DE/FR — нужно дописать таблицы в `dict.rs`
+  и константы `X11_GROUP_*` в `lay_daemon.rs` (порядок групп зависит от
+  `setxkbmap -layout us,ru,...`).
+- **`X11_GROUP_US=0`, `X11_GROUP_RU=1`** зашиты в код. Если у тебя другой
+  порядок — поправь две константы в `src/bin/lay_daemon.rs`.
+- **LLM smart-режим в этом форке отключён.** Если нужен — можно вернуть
+  `src/llm.rs` из upstream и добавить `zbus`/`llama_cpp` в `Cargo.toml`.
+- **Wayland не поддерживается.** Для Wayland есть оригинальный
+  [radislabus-star/lay-public](https://github.com/radislabus-star/lay-public) с
+  GNOME Shell extension.
 
-`Ещё -> LLM` в трее влияет только на `lay-daemon`. CLI использует модельную
-логику только если передан `--smart`.
+## Лицензия
 
-Обычная сборка не компилирует direct GGUF backend и не грузит модель при
-старте. Для экспериментов с Ollama:
+MIT — как у оригинала.
 
-```bash
-LAY_LLM_BACKEND=ollama lay --smart "fyukbqcrbq"
-```
+## Кредиты
 
-Для optional direct GGUF backend:
-
-```bash
-cargo build --release --features direct-llm
-LAY_LLM_BACKEND=direct LAY_GGUF_MODEL=/path/to/model.gguf lay --smart "fyukbqcrbq"
-```
-
-### Разработка
-
-```bash
-cargo test
-cargo build --release
-```
-
-N-gram helpers:
-
-```bash
-cargo run --bin lay-ngram-corpus -- check-cache
-cargo run --bin lay-ngram-corpus -- check --corpus corpus/ru_50mb.txt
-```
-
-Установка текущей сборки локально:
-
-```bash
-bash install.sh
-```
-
-### Roadmap
-
-- Uninstall-команда и более дружелюбный release-пакет.
-- Короткий demo GIF/video для double Shift.
-- Больше регрессионных тестов из реальных принятых/отклонённых исправлений.
-- Ещё более понятные privacy-настройки.
-- Довести KDE/X11 backend до подтверждённого рабочего статуса на чужих системах.
-- Исследование Sway/Hyprland.
-- Другие раскладки после стабилизации RU/EN.
-
-## English
-
-`lay` is a lightweight keyboard helper for Linux users who type in two layouts,
-especially **RU/EN**.
-
-The main workflow:
-
-```text
-Typed:   Ghbdtn
-Press:   Shift Shift
-Result:  Привет
-```
-
-`lay` is primarily tested on GNOME Wayland. It uses Rust, evdev/uinput, and a
-layout backend layer. GNOME uses a small Shell extension; KDE and X11 backends
-are experimental. The normal path is local-first: no cloud service, no network
-call, and no model required.
-
-Quick install:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/radislabus-star/lay-public/main/scripts/install-remote.sh | bash
-```
-
-Manual install:
-
-```bash
-git clone https://github.com/radislabus-star/lay-public.git ~/projects/lay
-cd ~/projects/lay
-bash install.sh
-```
-
-After installation, log out and log back in so the `input` group and GNOME
-extension are picked up.
-
-Update an existing git install:
-
-```bash
-cd ~/projects/lay
-bash update.sh
-```
-
-Extension ZIP for manual install or extensions.gnome.org upload:
-
-```bash
-bash scripts/package-extension.sh
-gnome-extensions install --force dist/gnome-extension/lay@radislabus-star.github.io-<version>.zip
-gnome-extensions enable lay@radislabus-star.github.io
-```
-
-The extension alone is only the GNOME Shell bridge and tray UI. The full
-double-Shift workflow also needs `lay-daemon`, so normal users should use
-`bash install.sh`.
-
-Supported/tested target:
-
-- Linux
-- GNOME Shell 45, 46, 47, or 50
-- Wayland session
-- Rust 1.75+
-- RU/EN layouts
-
-Experimental:
-
-- KDE backend via `qdbus/qdbus6 org.kde.keyboard /Layouts setLayout`.
-- X11 backend via `xkb-switch`, `xkblayout-state`, or `setxkbmap` fallback.
-- `ptah_alexs` window policy mode for GNOME: force a selected window/app to RU,
-  EN, or keep.
-
-Useful CLI examples:
-
-```bash
-lay "Ye djn ghbvth"
-# Ну вот пример
-
-lay "руддщ цщкдв"
-# hello world
-
-echo "ghbdtn" | lay
-# привет
-```
-
-Privacy summary: `lay-daemon` reads keyboard events locally to provide the
-double-Shift workflow. By default it does not send typed text anywhere, does not
-require a remote model, and does not keep a full keylog. Optional learning logs
-are local and disabled by default.
-
-Experimental Smart/LLM mode exists, but it is not the default product path. The
-default build does not compile direct GGUF support. Use `--features direct-llm`
-and explicit `LAY_LLM_BACKEND=direct` only for local model experiments.
-
-## License
-
-MIT
+- **Изначальная идея и архитектура daemon, WordBuffer, FSM, ngram, словари,
+  learning log:** [radislabus-star/lay-public](https://github.com/radislabus-star/lay-public).
+- **X11-порт, gesture-toggle, no_replace, фикс склейки одиночных служебных слов:**
+  этот форк.

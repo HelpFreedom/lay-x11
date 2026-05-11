@@ -1,18 +1,13 @@
 [package]
 name = "lay"
-version = "0.1.130"
+version = "0.2.0"
 edition = "2021"
-description = "Double Shift RU/EN layout rescue for Linux desktops"
+description = "Double Shift layout rescue for Linux/X11"
 license = "MIT"
-repository = "https://github.com/radislabus-star/lay-public"
 readme = "README.md"
 rust-version = "1.75"
-keywords = ["keyboard", "gnome", "wayland", "layout", "russian"]
+keywords = ["keyboard", "x11", "layout", "russian", "punto"]
 categories = ["command-line-utilities"]
-
-[features]
-default = []
-direct-llm = ["dep:llama_cpp"]
 
 [[bin]]
 name = "lay"
@@ -26,23 +21,13 @@ path = "src/bin/lay_daemon.rs"
 name = "lay-test-input"
 path = "src/bin/lay_test_input.rs"
 
-[[bin]]
-name = "lay-ngram-corpus"
-path = "src/bin/lay_ngram_corpus.rs"
-
-[[bin]]
-name = "lay-lem-research"
-path = "src/bin/lay_lem_research.rs"
-
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 arboard = "3"
-ureq = { version = "2", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 evdev = "0.13"
-zbus = "5.15.0"
-llama_cpp = { version = "0.3.2", optional = true }
+x11rb = { version = "0.13", features = ["xkb", "xtest"] }
 
 [profile.release]
 opt-level = 3

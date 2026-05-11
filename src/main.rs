@@ -1,14 +1,12 @@
 //! lay — Caramba/Punto-style конвертер раскладки клавиатуры.
 //!
-//! Двухрежимная логика:
-//! 1. Словарная конвертация US ↔ RU (микросекунды, детерминированно).
-//! 2. Гибридный smart/model-режим включается явно через `--smart`.
+//! Детерминированная конвертация US ↔ RU за микросекунды.
 
 use clap::Parser;
 use std::io::{self, IsTerminal, Read};
 use std::process;
 
-use lay::{dict, llm};
+use lay::dict;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -23,18 +21,6 @@ struct Args {
     /// Читать из/писать в буфер обмена.
     #[arg(short, long)]
     clipboard: bool,
-
-    /// Принудительно использовать LLM (даже если словарь дал хороший результат).
-    #[arg(short, long)]
-    smart: bool,
-
-    /// Не использовать LLM ни при каких условиях.
-    #[arg(long)]
-    no_llm: bool,
-
-    /// Legacy option: сохранён для совместимости, в простом режиме LLM не включается автоматически.
-    #[arg(long, default_value_t = 0.7)]
-    threshold: f32,
 
     /// Печатать какой метод сработал.
     #[arg(short, long)]
@@ -67,7 +53,8 @@ fn main() {
         process::exit(0);
     }
 
-    let (result, method) = convert(&text, &args);
+    let direction = dict::detect_direction(&text);
+    let result = dict::convert(&text, direction);
 
     if args.clipboard {
         if let Err(e) = write_clipboard(&result) {
@@ -75,37 +62,19 @@ fn main() {
             process::exit(1);
         }
         if args.verbose {
-            eprintln!("[{method}] {text:?} → {result:?}");
+            eprintln!("[dict] {text:?} → {result:?}");
         } else {
-            eprintln!("✓ в буфере обмена ({method})");
+            eprintln!("✓ в буфере обмена");
         }
     } else {
         if args.verbose {
-            eprintln!("[{method}]");
+            eprintln!("[dict]");
         }
         print!("{result}");
         if text.ends_with('\n') && !result.ends_with('\n') {
             println!();
         }
     }
-}
-
-fn convert(text: &str, args: &Args) -> (String, &'static str) {
-    let direction = dict::detect_direction(text);
-    let dict_result = dict::convert(text, direction);
-
-    if args.no_llm {
-        return (dict_result, "dict");
-    }
-
-    if args.smart {
-        return match llm::convert_hybrid(text, &dict_result) {
-            Ok(Some(result)) => (result, "llm-hybrid"),
-            _ => (dict_result, "dict-fallback"),
-        };
-    }
-
-    (dict_result, "dict")
 }
 
 fn read_clipboard() -> Result<String, Box<dyn std::error::Error>> {

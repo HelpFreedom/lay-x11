@@ -1,11 +1,13 @@
 [Unit]
-Description=lay — Caramba/Punto-style layout switcher daemon
+Description=lay — Caramba/Punto-style layout switcher daemon (X11)
 After=graphical-session.target
 
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/lay-daemon
-# Для диагностики: добавь --debug-log или -v. Вывод попадёт в journal и может содержать набранный текст.
+# На X11 daemon должен видеть DISPLAY и XAUTHORITY текущего сеанса.
+# Если запускаешь не из user-systemd сессии — поправь под свой setup.
+Environment=DISPLAY=:0
 Restart=on-failure
 RestartSec=3
 
