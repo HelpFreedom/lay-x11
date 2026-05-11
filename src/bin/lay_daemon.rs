@@ -5241,7 +5241,13 @@ fn load_hunspell_words_min_len(path: &str, min_chars: usize) -> std::io::Result<
 struct HunspellSuffixRule {
     strip: String,
     add: String,
-    condition: String,
+    condition: Vec<HunspellConditionToken>,
+}
+
+#[derive(Clone)]
+enum HunspellConditionToken {
+    Literal(char),
+    Class { negated: bool, chars: Vec<char> },
 }
 
 fn load_hunspell_generated_forms_min_len(
@@ -5307,26 +5313,87 @@ fn load_simple_hunspell_suffix_rules(
         let Some(flag) = parts[1].chars().next() else {
             continue;
         };
-        let condition = parts[4];
-        if !is_simple_hunspell_suffix_condition(condition) {
+        let Some(condition) = parse_hunspell_suffix_condition(parts[4]) else {
             continue;
-        }
+        };
         rules.entry(flag).or_default().push(HunspellSuffixRule {
             strip: parts[2].to_string(),
             add: parts[3].split('/').next().unwrap_or(parts[3]).to_string(),
-            condition: condition.to_string(),
+            condition,
         });
     }
 
     Ok(rules)
 }
 
-fn is_simple_hunspell_suffix_condition(condition: &str) -> bool {
-    condition == "." || condition.chars().all(is_cyrillic_letter)
+fn parse_hunspell_suffix_condition(condition: &str) -> Option<Vec<HunspellConditionToken>> {
+    if condition == "." {
+        return Some(Vec::new());
+    }
+
+    let mut tokens = Vec::new();
+    let mut chars = condition.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '[' {
+            let negated = if chars.peek() == Some(&'^') {
+                chars.next();
+                true
+            } else {
+                false
+            };
+            let mut class_chars = Vec::new();
+            let mut closed = false;
+            for class_ch in chars.by_ref() {
+                if class_ch == ']' {
+                    closed = true;
+                    break;
+                }
+                if !is_cyrillic_letter(class_ch) {
+                    return None;
+                }
+                class_chars.push(class_ch);
+            }
+            if !closed || class_chars.is_empty() {
+                return None;
+            }
+            tokens.push(HunspellConditionToken::Class {
+                negated,
+                chars: class_chars,
+            });
+        } else if is_cyrillic_letter(ch) {
+            tokens.push(HunspellConditionToken::Literal(ch));
+        } else {
+            return None;
+        }
+    }
+
+    (!tokens.is_empty()).then_some(tokens)
 }
 
-fn hunspell_condition_matches(word: &str, condition: &str) -> bool {
-    condition == "." || word.ends_with(condition)
+fn hunspell_condition_matches(word: &str, condition: &[HunspellConditionToken]) -> bool {
+    if condition.is_empty() {
+        return true;
+    }
+
+    let chars: Vec<char> = word.chars().collect();
+    if chars.len() < condition.len() {
+        return false;
+    }
+    let start = chars.len() - condition.len();
+    condition
+        .iter()
+        .zip(chars[start..].iter().copied())
+        .all(|(token, ch)| match token {
+            HunspellConditionToken::Literal(expected) => *expected == ch,
+            HunspellConditionToken::Class { negated, chars } => {
+                let contains = chars.contains(&ch);
+                if *negated {
+                    !contains
+                } else {
+                    contains
+                }
+            }
+        })
 }
 
 fn load_word_list(path: &std::path::Path) -> std::io::Result<HashSet<String>> {
@@ -8000,6 +8067,7 @@ mod tests {
         assert!(is_known_russian_word_or_form("видишь"));
         assert!(is_known_russian_word_or_form("значит"));
         assert!(is_known_russian_word_or_form("страдает"));
+        assert!(is_known_russian_word_or_form("установки"));
     }
 
     #[test]
@@ -8584,6 +8652,7 @@ mod tests {
         assert_eq!(apply_typing_assist_exact("словами "), None);
         assert_eq!(apply_typing_assist_exact("вариантами "), None);
         assert_eq!(apply_typing_assist_exact("страдает "), None);
+        assert_eq!(apply_typing_assist_exact("установки "), None);
     }
 
     #[test]
